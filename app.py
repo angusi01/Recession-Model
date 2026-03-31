@@ -66,6 +66,8 @@ def main():
     
     with st.spinner("Fetching live economic data..."):
         # Fetching all required data
+        trends_val, trends_err = fetch_google_trends()
+        
         raw_data = {
             "gdp_qq": fetch_abs_data("NA/1.1.1.20.Q", "gdp_qq"),
             "unemployment": fetch_abs_data("LF/1.3.1599.20.M", "unemployment"),
@@ -77,9 +79,12 @@ def main():
             "brent_crude": fetch_brent_crude(),
             "asx_cash_rate": fetch_asx_futures(),
             "westpac_sentiment": fetch_westpac_sentiment(),
-            "google_trends": fetch_google_trends(),
+            "google_trends": trends_val,
             "keyword_hits": fetch_official_keywords()
         }
+
+    if trends_err:
+        st.warning("⚠️ **Google Trends Alert:** API rate limit reached. Using last known cached value for consumer sentiment overlay.")
 
     # Model Calculation (Base Case)
     results_base = calculate_total_probability(raw_data)

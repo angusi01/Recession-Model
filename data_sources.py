@@ -170,9 +170,24 @@ def fetch_westpac_sentiment():
         log_failure("Westpac Sentiment", repr(e))
         return FALLBACKS["westpac_sentiment"]
 
-@st.cache_data(ttl=TTL["twice_daily"], show_spinner=False)
 def fetch_google_trends():
-    """Pull Google Trends data for economic stress keywords."""
+    """Pull Google Trends data for economic stress keywords. Returns (value, is_error)."""
+    import os
+    CACHE_FILE = ".trends_cache.json"
+    now = time.time()
+    
+    cache_data = None
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, "r") as f:
+                cache_data = json.load(f)
+        except Exception:
+            pass
+
+    # Return valid cache if within TTL
+    if cache_data and (now - cache_data["timestamp"] < TTL["twice_daily"]):
+        return cache_data["value"], False
+        
     try:
         pytrends = TrendReq(hl='en-US', tz=360, timeout=(10,25))
         kw_list = ["recession australia", "job losses australia", "mortgage stress", "fuel prices australia"]
@@ -182,12 +197,24 @@ def fetch_google_trends():
         if not data.empty:
             # Average the past 90 days for all terms
             data = data.drop(labels=['isPartial'], axis='columns', errors='ignore')
-            mean_score = data.mean().mean() # average across time, then average across terms
-            return float(mean_score)
+            mean_score = float(data.mean().mean()) # average across time, then average across terms
+            
+            # Save new valid value to cache
+            try:
+                with open(CACHE_FILE, "w") as f:
+                    json.dump({"value": mean_score, "timestamp": now}, f)
+            except Exception:
+                pass
+                
+            return mean_score, False
         raise ValueError("Empty trends data")
     except Exception as e:
         log_failure("Google Trends", repr(e))
-        return FALLBACKS["google_trends"]
+        
+    # Fetch failed, fallback to expired cache if available
+    if cache_data:
+        return cache_data["value"], True
+    return FALLBACKS["google_trends"], True
 
 @st.cache_data(ttl=TTL["hourly"], show_spinner=False)
 def fetch_official_keywords():
