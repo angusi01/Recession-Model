@@ -1,0 +1,11 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Environment variables
+.env
+
+# Streamlit config (if you add local secrets later)
+.streamlit/secrets.toml
