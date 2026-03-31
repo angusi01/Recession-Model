@@ -8,7 +8,7 @@ from config import THRESHOLDS, WEIGHTS, URLS
 from data_sources import (
     fetch_abs_data, fetch_rba_csv, fetch_asic_insolvency,
     fetch_brent_crude, fetch_asx_futures, fetch_westpac_sentiment,
-    fetch_google_trends, fetch_official_keywords
+    fetch_google_trends, fetch_official_keywords, fetch_kalshi_recession_odds
 )
 from model import calculate_total_probability
 from history import get_and_update_history
@@ -80,7 +80,8 @@ def main():
             "asx_cash_rate": fetch_asx_futures(),
             "westpac_sentiment": fetch_westpac_sentiment(),
             "google_trends": trends_val,
-            "keyword_hits": fetch_official_keywords()
+            "keyword_hits": fetch_official_keywords(),
+            "kalshi_recession": fetch_kalshi_recession_odds(),
         }
 
     if trends_err:
@@ -207,11 +208,55 @@ def main():
     with col_sources:
         st.subheader("Data Sources")
         source_df = pd.DataFrame({
-            "Source": ["ABS", "RBA", "ASIC", "ASX", "Alpha Vantage", "Westpac", "Google Trends", "Gov Media"],
-            "Description": ["Economic Data", "Cash Rate", "Insolvencies", "Futures", "Brent Crude", "Sentiment", "Keyword Volume", "Signals"],
-            "Status": ["Active"] * 8
+            "Source": ["ABS", "RBA", "ASIC", "ASX", "Alpha Vantage", "Westpac", "Google Trends", "Gov Media", "Kalshi"],
+            "Description": ["Economic Data", "Cash Rate", "Insolvencies", "Futures", "Brent Crude", "Sentiment", "Keyword Volume", "Signals", "US Recession Market"],
+            "Status": ["Active"] * 9
         })
         st.dataframe(source_df, hide_index=True, use_container_width=True)
+
+    st.divider()
+
+    # 4. Prediction Market: Market vs Model
+    st.subheader("🎯 Prediction Markets: Market vs Model")
+    kalshi_odds = raw_data["kalshi_recession"]
+    model_prob = results["total_probability"]
+    kalshi_overlay_val = results["overlays"].get("US Prediction Market (Kalshi)", 0.0)
+    
+    pm_col1, pm_col2, pm_col3 = st.columns(3)
+    
+    with pm_col1:
+        st.metric(
+            label="🇺🇸 Kalshi: US Recession 2026",
+            value=f"{kalshi_odds:.1f}%",
+            help="Implied probability from the YES/NO prediction market on Kalshi. "
+                 "Midpoint of bid/ask on KXRECSSNBER-26 contract."
+        )
+        us_signal = "🔴 High" if kalshi_odds >= 50 else ("🟠 Elevated" if kalshi_odds >= 25 else "🟢 Normal")
+        st.caption(f"US recession signal: **{us_signal}**")
+        st.caption("[View on Kalshi ↗](https://kalshi.com/markets/kxrecssnber-26)")
+
+    with pm_col2:
+        st.metric(
+            label="🇦🇺 Model: AU Recession Probability",
+            value=f"{model_prob:.1f}%",
+            help="This model's current output — weighted indicators plus all overlays."
+        )
+        spread = model_prob - kalshi_odds
+        spread_text = f"+{spread:.1f} pts above Kalshi" if spread >= 0 else f"{spread:.1f} pts below Kalshi"
+        st.caption(f"Spread vs market: **{spread_text}**")
+
+    with pm_col3:
+        st.metric(
+            label="📊 Kalshi → AU Overlay Applied",
+            value=f"+{kalshi_overlay_val:.1f} pts",
+            help="The portion of AU probability added by the Kalshi signal. "
+                 "Only activates above 25% threshold. Capped at +15 pts."
+        )
+        if kalshi_odds < 25:
+            st.caption("Below 25% threshold — no overlay currently active.")
+        else:
+            effective_pct = min(100, (kalshi_overlay_val / 15.0) * 100)
+            st.caption(f"Cap utilisation: **{effective_pct:.0f}% of +15 pt max**")
 
     st.divider()
     with st.expander("📖 Methodology & Data Sources"):
@@ -228,7 +273,8 @@ def main():
         - **Real Wage Growth (10%)**: Consumer squeeze.
         - **Insolvencies (10%)**: Corporate stress overlay.
         
-        *Overlays*: Brent Crude shocks, Consumer Sentiment crashes, and Media Panic signals add discrete penalty multipliers to the base score.
+        *Overlays*: Brent Crude shocks, Consumer Sentiment crashes, Media Panic signals, and US Prediction Market odds add discrete penalty multipliers to the base score.
+        The **Kalshi overlay** is applied only when US recession odds exceed 25% (above normal expansion baseline), scaling at +0.5 AU pts per 1 US pt, capped at +15 pts.
         All signals are derived direct from official endpoints (ABS, RBA, ASIC) and priced daily using market futures.
         """)
 

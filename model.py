@@ -85,6 +85,14 @@ def calculate_overlays(raw_data):
     keywords = raw_data["keyword_hits"]
     overlays["Official Media Keywords"] = min(5.0, keywords * 0.3)
     
+    # Prediction market overlay: Kalshi US recession 2026 odds
+    # Threshold: 25% (above normal expansion pricing of 15-20%)
+    # Scaling: +0.5 AU pts per 1 US pt above threshold
+    # Cap: +15 pts max (prevents runaway if US odds jump to extreme values)
+    kalshi_odds = raw_data.get("kalshi_recession", 25.0)
+    kalshi_overlay = max(0.0, (kalshi_odds - 25.0) * 0.5)
+    overlays["US Prediction Market (Kalshi)"] = min(15.0, kalshi_overlay)
+    
     return overlays
 
 def calculate_total_probability(raw_data):

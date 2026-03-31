@@ -28,7 +28,8 @@ FALLBACKS = {
     "asx_cash_rate": 4.35,
     "westpac_sentiment": 82.0,
     "google_trends": 50.0,
-    "keyword_hits": 5
+    "keyword_hits": 5,
+    "kalshi_recession": 25.0
 }
 
 def log_failure(source_name, error=""):
@@ -215,6 +216,32 @@ def fetch_google_trends():
     if cache_data:
         return cache_data["value"], True
     return FALLBACKS["google_trends"], True
+
+@st.cache_data(ttl=TTL["hourly"], show_spinner=False)
+def fetch_kalshi_recession_odds():
+    """Fetch US recession 2026 implied probability from Kalshi's public JSON API.
+    
+    Uses the midpoint of bid/ask in dollar terms so prices are unauthenticated
+    (public endpoint). Returns a percentage 0-100.
+    """
+    try:
+        url = URLS["kalshi_recession"]
+        resp = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        resp.raise_for_status()
+        market = resp.json().get("market", {})
+        
+        yes_bid = market.get("yes_bid_dollars")
+        yes_ask = market.get("yes_ask_dollars")
+        
+        if yes_bid is None or yes_ask is None:
+            raise ValueError(f"Missing price fields. Market keys: {list(market.keys())[:10]}")
+        
+        midpoint = (float(yes_bid) + float(yes_ask)) / 2.0
+        return round(midpoint * 100, 2)  # Convert dollars (0-1) to percentage
+    except Exception as e:
+        log_failure("Kalshi US Recession Odds", repr(e))
+        return FALLBACKS["kalshi_recession"]
+
 
 @st.cache_data(ttl=TTL["hourly"], show_spinner=False)
 def fetch_official_keywords():
