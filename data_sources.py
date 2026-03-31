@@ -1,0 +1,218 @@
+import streamlit as st
+import pandas as pd
+import requests
+from bs4 import BeautifulSoup
+from pytrends.request import TrendReq
+import time
+from datetime import datetime
+import json
+import logging
+
+from config import URLS, KEYWORDS, TOTAL_REGISTERED_COMPANIES, ALPHAVANTAGE_KEY, TTL
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Fallback cache in case of API/scrape failure
+# This ensures the app never crashes
+FALLBACKS = {
+    "gdp_qq": 0.2,
+    "unemployment": 4.1,
+    "cpi_headline": 4.1,
+    "cpi_trimmed": 3.9,
+    "cash_rate": 4.35,
+    "real_wage_growth": 0.1,
+    "insolvency_rate": 0.35,
+    "brent_crude": 80.0,
+    "asx_cash_rate": 4.35,
+    "westpac_sentiment": 82.0,
+    "google_trends": 50.0,
+    "keyword_hits": 5
+}
+
+def log_failure(source_name, error=""):
+    logger.warning(f"Failed to fetch {source_name}: {error}. Using fallback.")
+
+@st.cache_data(ttl=TTL["daily"], show_spinner=False)
+def fetch_abs_data(series_id, fallback_key):
+    """Fetch data from the ABS API."""
+    url = f"{URLS['abs_base']}{series_id}?format=jsondata"
+    try:
+        response = requests.get(url, timeout=10, headers={"Accept": "application/vnd.sdmx.data+json"})
+        response.raise_for_status()
+        data = response.json()
+        
+        # Parse standard ABS SDMX JSON structure based on prompt
+        observations = data["data"]["dataSets"][0]["series"]["0:0:0:0:0"]["observations"]
+        # Find the max key (latest observation)
+        latest_key = max(observations.keys(), key=lambda x: int(x))
+        latest_value = observations[latest_key][0]
+        return float(latest_value)
+    except Exception as e:
+        log_failure(f"ABS ({series_id})", repr(e))
+        return FALLBACKS[fallback_key]
+
+@st.cache_data(ttl=TTL["daily"], show_spinner=False)
+def fetch_rba_csv(url, target_col, fallback_key):
+    """Fetch and parse RBA CSV feeds."""
+    try:
+        # RBA CSVs usually have 10 rows of metadata
+        df = pd.read_csv(url, skiprows=10)
+        # Drop rows where the target column is NaN, then get the last value
+        df = df.dropna(subset=[target_col])
+        if not df.empty:
+            latest_val = df[target_col].iloc[-1]
+            return float(latest_val)
+        return FALLBACKS[fallback_key]
+    except Exception as e:
+        log_failure(f"RBA CSV ({target_col})", repr(e))
+        return FALLBACKS[fallback_key]
+
+@st.cache_data(ttl=TTL["daily"], show_spinner=False)
+def fetch_asic_insolvency():
+    """Scrape ASIC insolvency data to calculate rate."""
+    url = URLS["asic_insolvency"]
+    try:
+        # NOTE: ASIC site may require deeper scraping or headless browser.
+        # Here we perform a basic text search as a best-effort approach.
+        response = requests.get(url, timeout=15, headers={'User-Agent': 'Mozilla/5.0'})
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Attempt to find table data for "External administrations"
+        # Since the exact DOM might change, we look for text
+        tds = soup.find_all("td")
+        for i, td in enumerate(tds):
+            if "External administrations" in td.get_text():
+                # Usually the value is in the next column
+                val_text = tds[i+1].get_text().replace(",", "")
+                if val_text.isdigit():
+                    count = int(val_text)
+                    return (count / TOTAL_REGISTERED_COMPANIES) * 100
+        
+        raise ValueError("Could not find table data")
+    except Exception as e:
+        log_failure("ASIC Insolvency", repr(e))
+        return FALLBACKS["insolvency_rate"]
+
+@st.cache_data(ttl=TTL["hourly"], show_spinner=False)
+def fetch_brent_crude():
+    """Fetch Brent crude (WTI used as proxy in AlphaVantage free tier)."""
+    try:
+        if not ALPHAVANTAGE_KEY or ALPHAVANTAGE_KEY == "demo":
+            raise ValueError("No valid AlphaVantage key")
+            
+        url = f"{URLS['alphavantage']}?function=WTI&interval=daily&apikey={ALPHAVANTAGE_KEY}"
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        
+        latest_date = list(data['data'][0].keys())[0] if isinstance(data['data'], list) else None
+        if not latest_date:
+            latest_data = data['data'][0]
+            val = float(latest_data['value'])
+            return val
+    except Exception as e:
+        # Using WTI API endpoint directly might return different JSON structure
+        try:
+             # Try parsing standard AV format
+             res_data = requests.get(f"{URLS['alphavantage']}?function=WTI&interval=monthly&apikey={ALPHAVANTAGE_KEY}").json()
+             if "data" in res_data and len(res_data["data"]) > 0:
+                 return float(res_data["data"][0]["value"])
+             raise ValueError("Unexpected JSON structure")
+        except Exception as inner_e:
+             log_failure("Brent Crude (Alpha Vantage)", repr(inner_e))
+             return FALLBACKS["brent_crude"]
+
+@st.cache_data(ttl=TTL["daily"], show_spinner=False)
+def fetch_asx_futures():
+    """Scrape implied cash rate from ASX 6 months forward."""
+    try:
+        url = URLS["asx_rate_tracker"]
+        response = requests.get(url, timeout=15, headers={'User-Agent': 'Mozilla/5.0'})
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Try to find target rate text
+        # If scraping fails due to dynamic JS, we fall back
+        for row in soup.find_all('tr'):
+            text = row.get_text()
+            if 'Implied yield' in text or 'Market Expectation' in text:
+                # Naive extraction
+                 parts = text.split('%')
+                 for p in parts:
+                     nums = [s for s in p.split() if s.replace('.','',1).isdigit()]
+                     if nums:
+                         return float(nums[-1])
+        raise ValueError("Could not parse ASX rate")
+    except Exception as e:
+        log_failure("ASX Futures", repr(e))
+        return FALLBACKS["asx_cash_rate"]
+
+@st.cache_data(ttl=TTL["daily"], show_spinner=False)
+def fetch_westpac_sentiment():
+    """Scrape Westpac sentiment index."""
+    try:
+        url = URLS["westpac_mics"]
+        response = requests.get(url, timeout=15, headers={'User-Agent': 'Mozilla/5.0'})
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Find latest media release linking to sentiment
+        text = soup.get_text()
+        # Look for a number near "Consumer Sentiment Index"
+        # Highly prone to failure, usually relies on text heuristic
+        idx = text.find("Consumer Sentiment")
+        if idx != -1:
+             snippet = text[idx:idx+100]
+             import re
+             match = re.search(r'\b\d{2}\.\d\b', snippet)
+             if match:
+                 return float(match.group())
+        raise ValueError("Could not find sentiment index in text")
+    except Exception as e:
+        log_failure("Westpac Sentiment", repr(e))
+        return FALLBACKS["westpac_sentiment"]
+
+@st.cache_data(ttl=TTL["twice_daily"], show_spinner=False)
+def fetch_google_trends():
+    """Pull Google Trends data for economic stress keywords."""
+    try:
+        pytrends = TrendReq(hl='en-US', tz=360, timeout=(10,25))
+        kw_list = ["recession australia", "job losses australia", "mortgage stress", "fuel prices australia"]
+        pytrends.build_payload(kw_list, cat=0, timeframe='today 3-m', geo='AU')
+        data = pytrends.interest_over_time()
+        
+        if not data.empty:
+            # Average the past 90 days for all terms
+            data = data.drop(labels=['isPartial'], axis='columns', errors='ignore')
+            mean_score = data.mean().mean() # average across time, then average across terms
+            return float(mean_score)
+        raise ValueError("Empty trends data")
+    except Exception as e:
+        log_failure("Google Trends", repr(e))
+        return FALLBACKS["google_trends"]
+
+@st.cache_data(ttl=TTL["hourly"], show_spinner=False)
+def fetch_official_keywords():
+    """Scrape official media sites for crisis keywords and return count."""
+    hit_count = 0
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    
+    for source, url in zip(KEYWORDS.keys(), URLS["official_keywords"]):
+        try:
+            resp = requests.get(url, timeout=10, headers=headers)
+            if resp.status_code == 200:
+                text = resp.text.lower()
+                for kw in KEYWORDS[source]:
+                    hit_count += text.count(kw)
+        except Exception as e:
+            log_failure(f"Official Keyword ({source})", repr(e))
+            
+    # If network totally down, return fallback
+    if hit_count == 0:
+        # It could truly be 0, but as a fallback system we just report 0 hits if empty
+        pass
+    
+    return hit_count
