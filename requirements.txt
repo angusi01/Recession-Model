@@ -6,3 +6,4 @@ beautifulsoup4
 pytrends
 lxml
 python-dotenv
+kaleido
