@@ -108,22 +108,17 @@ def fetch_brent_crude():
         response.raise_for_status()
         data = response.json()
         
-        latest_date = list(data['data'][0].keys())[0] if isinstance(data['data'], list) else None
-        if not latest_date:
-            latest_data = data['data'][0]
-            val = float(latest_data['value'])
-            return val
+        if "data" in data and len(data["data"]) > 0:
+            val = data["data"][0]["value"]
+            if val == ".":
+                # Current day might not be published yet, grab previous day
+                val = data["data"][1]["value"]
+            return float(val)
+        else:
+            raise ValueError(f"Unexpected JSON structure: {str(data)[:100]}")
     except Exception as e:
-        # Using WTI API endpoint directly might return different JSON structure
-        try:
-             # Try parsing standard AV format
-             res_data = requests.get(f"{URLS['alphavantage']}?function=WTI&interval=monthly&apikey={ALPHAVANTAGE_KEY}").json()
-             if "data" in res_data and len(res_data["data"]) > 0:
-                 return float(res_data["data"][0]["value"])
-             raise ValueError("Unexpected JSON structure")
-        except Exception as inner_e:
-             log_failure("Brent Crude (Alpha Vantage)", repr(inner_e))
-             return FALLBACKS["brent_crude"]
+        log_failure("Brent Crude (Alpha Vantage)", repr(e))
+        return FALLBACKS["brent_crude"]
 
 @st.cache_data(ttl=TTL["daily"], show_spinner=False)
 def fetch_asx_futures():
