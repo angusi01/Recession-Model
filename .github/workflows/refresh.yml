@@ -11,5 +11,5 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Ping Streamlit App
-        # Replace the URL below with your actual deployed Streamlit Cloud URL
-        run: curl -sL https://YOUR-STREAMLIT-APP.streamlit.app > /dev/null
+        # Pings the deployed Streamlit Cloud URL daily to refresh the cache
+        run: curl -sL https://ausrecessionodds.streamlit.app > /dev/null

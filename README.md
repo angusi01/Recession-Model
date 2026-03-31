@@ -57,5 +57,5 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Ping Streamlit App
-        run: curl -s https://your-streamlit-app-url.streamlit.app > /dev/null
+        run: curl -s https://ausrecessionodds.streamlit.app > /dev/null
 ```
