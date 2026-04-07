@@ -13,14 +13,14 @@ from data_sources import (
 from model import calculate_total_probability
 from history import get_and_update_history
 
-st.set_page_config(page_title="Australia Recession Probability Monitor", layout="wide")
+st.set_page_config(page_title="AU Recession Forecast — ABS March 2027", layout="wide")
 
 def display_gauge(probability):
     """Render the main probability gauge."""
     fig = go.Figure(go.Indicator(
         mode = "gauge+number",
         value = probability,
-        title = {'text': "Recession Probability"},
+        title = {'text': "Probability of ABS-Confirmed Recession — Sep-2026 + Dec-2026 | Announced March 2027"},
         gauge = {
             'axis': {'range': [None, 100]},
             'bar': {'color': "darkgray"},
@@ -47,7 +47,7 @@ def generate_dynamic_advice(probability, raw_data):
     if probability < 30:
         advice += "The economy is running reliably clear of recessionary thresholds. No immediate action triggers noted."
     elif 30 <= probability < 60:
-        advice += "Elevated risks present. Close monitoring of employment and inflation trends is advised."
+        advice += "Elevated risks present. Close monitoring of employment and leading indicator trends is advised."
     else:
         advice += "🔴 **High Recession Risk.** To exit the danger zone:\n"
         # Check which metrics are nearest danger
@@ -55,27 +55,33 @@ def generate_dynamic_advice(probability, raw_data):
             advice += f"- GDP must print at least {THRESHOLDS['gdp_qq']['safe']}% q/q.\n"
         if raw_data["unemployment"] >= THRESHOLDS["unemployment"]["danger"] - 0.5:
             advice += f"- Unemployment needs to fall back below {THRESHOLDS['unemployment']['safe']}%. \n"
-        if raw_data["cpi_headline"] >= THRESHOLDS["cpi_headline"]["danger"] - 1.0:
-            advice += f"- Headline CPI must drop toward the RBA {THRESHOLDS['cpi_headline']['safe']}% band.\n"
+        if raw_data["yield_curve"] <= THRESHOLDS["yield_curve"]["danger"] + 0.1:
+            advice += f"- Yield curve needs to steepen back above {THRESHOLDS['yield_curve']['safe']}%.\n"
     
     return advice
 
 def main():
-    st.title("Australia Recession Probability Monitor 📉")
-    st.write("A live-updating gauge of macroeconomic stability, forward-priced using market signals.")
+    st.title("AU Recession Forecast — ABS March 2027 📉")
+    st.write("Probability of an ABS-confirmed recession (Sep-2026 + Dec-2026 quarters), announced March 2027.")
     
     with st.spinner("Fetching live economic data..."):
         # Fetching all required data
         trends_val, trends_err = fetch_google_trends()
-        
+
+        # Yield curve: 10-year CGS minus 2-year CGS (RBA F2 table)
+        cgs_10y = fetch_rba_csv(URLS["rba_yield_curve"], "FCMYGBAG10D", "yield_curve")
+        cgs_2y = fetch_rba_csv(URLS["rba_yield_curve"], "FCMYGBAG2D", "yield_curve")
+        yield_curve_val = cgs_10y - cgs_2y
+
         raw_data = {
+            "yield_curve": yield_curve_val,
+            "iron_ore": fetch_rba_csv(URLS["rba_cash_rate"], "Iron ore", "iron_ore"),
             "gdp_qq": fetch_abs_data("NA/1.1.1.20.Q", "gdp_qq"),
             "unemployment": fetch_abs_data("LF/1.3.1599.20.M", "unemployment"),
-            "cpi_headline": fetch_abs_data("CPI/1.10001.10.20.Q", "cpi_headline"),
             "cpi_trimmed": fetch_abs_data("CPI/1.10002.10.20.Q", "cpi_trimmed"),
-            "cash_rate": fetch_rba_csv(URLS["rba_cash_rate"], "Cash Rate Target", "cash_rate"),
             "real_wage_growth": fetch_abs_data("WPI/1.3.999901.20.Q", "real_wage_growth") - fetch_abs_data("CPI/1.10001.10.20.Q", "cpi_headline"),
             "insolvency_rate": fetch_asic_insolvency(),
+            "anz_job_ads": -5.0,  # TODO: replace with live ANZ Job Ads m/m % change when feed is available
             "brent_crude": fetch_brent_crude(),
             "asx_cash_rate": fetch_asx_futures(),
             "westpac_sentiment": fetch_westpac_sentiment(),
@@ -106,14 +112,17 @@ def main():
     if scenario == "Soft Landing":
         adjusted_data["gdp_qq"] = max(adjusted_data["gdp_qq"] + 0.3, 0.4)
         adjusted_data["unemployment"] = max(adjusted_data["unemployment"] - 0.3, 3.8)
-        adjusted_data["cpi_headline"] = max(adjusted_data["cpi_headline"] - 0.5, 2.5)
         adjusted_data["cpi_trimmed"] = max(adjusted_data["cpi_trimmed"] - 0.5, 2.5)
-        adjusted_data["cash_rate"] = max(adjusted_data["cash_rate"] - 0.5, 3.0)
+        adjusted_data["yield_curve"] = adjusted_data["yield_curve"] + 0.3
+        adjusted_data["iron_ore"] = adjusted_data["iron_ore"] + 10.0
+        adjusted_data["anz_job_ads"] = adjusted_data["anz_job_ads"] + 5.0
     elif scenario == "Hard Landing":
         adjusted_data["gdp_qq"] -= 0.6
         adjusted_data["unemployment"] += 1.0
-        adjusted_data["cpi_headline"] += 1.0
         adjusted_data["cpi_trimmed"] += 1.0
+        adjusted_data["yield_curve"] = adjusted_data["yield_curve"] - 0.4
+        adjusted_data["iron_ore"] = adjusted_data["iron_ore"] - 15.0
+        adjusted_data["anz_job_ads"] = adjusted_data["anz_job_ads"] - 8.0
         adjusted_data["brent_crude"] += 20
         
     results = calculate_total_probability(adjusted_data)
@@ -161,7 +170,9 @@ def main():
         st.markdown("### 🚨 Tripwires")
         gdp_val = adjusted_data["gdp_qq"]
         unemp_val = adjusted_data["unemployment"]
-        cpi_val = adjusted_data["cpi_headline"]
+        yc_val = adjusted_data["yield_curve"]
+        io_val = adjusted_data["iron_ore"]
+        anz_val = adjusted_data["anz_job_ads"]
         
         def trip_status(val, danger, safe, inverted=False):
             if inverted:
@@ -172,21 +183,25 @@ def main():
                 if val >= safe: return "🟠"
             return "🟢"
             
+        st.markdown(f"{trip_status(yc_val, -0.3, 0.2, True)} **Yield Curve** ({yc_val:.2f}%)")
+        st.markdown(f"{trip_status(io_val, 70.0, 85.0, True)} **Iron Ore** (${io_val:.0f})")
         st.markdown(f"{trip_status(gdp_val, -0.2, 0.2, True)} **GDP q/q** ({gdp_val:.1f}%)")
         st.markdown(f"{trip_status(unemp_val, 5.0, 4.5)} **Unemployment** ({unemp_val:.1f}%)")
-        st.markdown(f"{trip_status(cpi_val, 4.5, 3.5)} **CPI** ({cpi_val:.1f}%)")
+        st.markdown(f"{trip_status(anz_val, -15.0, -5.0, True)} **ANZ Job Ads** ({anz_val:+.1f}%)")
         
     st.divider()
 
     # 2. Metric Cards
     st.subheader("Current Core Indicators (Live Fetch)")
-    m1, m2, m3, m4, m5, m6 = st.columns(6)
-    m1.metric("GDP (q/q)", f"{adjusted_data['gdp_qq']:.2f}%", f"{adjusted_data['gdp_qq'] - raw_data['gdp_qq']:.2f}%" if scenario != "Base Case" else None)
-    m2.metric("Unemployment", f"{adjusted_data['unemployment']:.1f}%", f"{adjusted_data['unemployment'] - raw_data['unemployment']:.1f}%" if scenario != "Base Case" else None)
-    m3.metric("Inflation (CPI)", f"{adjusted_data['cpi_headline']:.1f}%", f"{adjusted_data['cpi_headline'] - raw_data['cpi_headline']:.1f}%" if scenario != "Base Case" else None)
-    m4.metric("Trimmed Mean", f"{adjusted_data['cpi_trimmed']:.1f}%", f"{adjusted_data['cpi_trimmed'] - raw_data['cpi_trimmed']:.1f}%" if scenario != "Base Case" else None)
-    m5.metric("Cash Rate", f"{adjusted_data['cash_rate']:.2f}%", f"{adjusted_data['cash_rate'] - raw_data['cash_rate']:.2f}%" if scenario != "Base Case" else None)
+    m1, m2, m3, m4, m5, m6, m7, m8 = st.columns(8)
+    m1.metric("Yield Curve", f"{adjusted_data['yield_curve']:.2f}%", f"{adjusted_data['yield_curve'] - raw_data['yield_curve']:.2f}%" if scenario != "Base Case" else None)
+    m2.metric("Iron Ore", f"${adjusted_data['iron_ore']:.0f}", f"{adjusted_data['iron_ore'] - raw_data['iron_ore']:.0f}" if scenario != "Base Case" else None)
+    m3.metric("GDP (q/q)", f"{adjusted_data['gdp_qq']:.2f}%", f"{adjusted_data['gdp_qq'] - raw_data['gdp_qq']:.2f}%" if scenario != "Base Case" else None)
+    m4.metric("Unemployment", f"{adjusted_data['unemployment']:.1f}%", f"{adjusted_data['unemployment'] - raw_data['unemployment']:.1f}%" if scenario != "Base Case" else None)
+    m5.metric("ANZ Job Ads", f"{adjusted_data['anz_job_ads']:+.1f}%", f"{adjusted_data['anz_job_ads'] - raw_data['anz_job_ads']:.1f}%" if scenario != "Base Case" else None)
     m6.metric("Real Wage Growth", f"{adjusted_data['real_wage_growth']:.2f}%", f"{adjusted_data['real_wage_growth'] - raw_data['real_wage_growth']:.2f}%" if scenario != "Base Case" else None)
+    m7.metric("Trimmed CPI", f"{adjusted_data['cpi_trimmed']:.1f}%", f"{adjusted_data['cpi_trimmed'] - raw_data['cpi_trimmed']:.1f}%" if scenario != "Base Case" else None)
+    m8.metric("Insolvencies", f"{adjusted_data['insolvency_rate']:.2f}%", f"{adjusted_data['insolvency_rate'] - raw_data['insolvency_rate']:.2f}%" if scenario != "Base Case" else None)
     
     st.divider()
 
@@ -250,32 +265,42 @@ def main():
             label="📊 Kalshi → AU Overlay Applied",
             value=f"+{kalshi_overlay_val:.1f} pts",
             help="The portion of AU probability added by the Kalshi signal. "
-                 "Only activates above 25% threshold. Capped at +15 pts."
+                 "Only activates above 25% threshold. Capped at +12 pts."
         )
         if kalshi_odds < 25:
             st.caption("Below 25% threshold — no overlay currently active.")
         else:
-            effective_pct = min(100, (kalshi_overlay_val / 15.0) * 100)
-            st.caption(f"Cap utilisation: **{effective_pct:.0f}% of +15 pt max**")
+            effective_pct = min(100, (kalshi_overlay_val / 12.0) * 100)
+            st.caption(f"Cap utilisation: **{effective_pct:.0f}% of +12 pt max**")
 
     st.divider()
     with st.expander("📖 Methodology & Data Sources"):
         st.markdown("""
-        **Australia Recession Probability Monitor Methodology**
+        **AU Recession Forecast — ABS March 2027 Methodology**
         
-        This model utilizes a continuous weighting mechanism rather than a binary threshold. 
-        Each core indicator spans from a 'safe' to a 'danger' limit and accumulates its weighted percentage score.
+        This model targets an ABS-confirmed recession across **Sep-2026 (Q1 FY27)** and **Dec-2026 (Q2 FY27)**, 
+        with the official ABS announcement expected in **March 2027**.
         
-        - **GDP (20%)**: Standard contraction limits.
-        - **Unemployment (20%)**: RBA NAIRU overshoot.
-        - **CPI & Trimmed (30%)**: Central bank mandate breach.
-        - **Cash Rate (10%)**: Interest rate restrictiveness.
-        - **Real Wage Growth (10%)**: Consumer squeeze.
-        - **Insolvencies (10%)**: Corporate stress overlay.
+        Each core indicator is scored linearly from 0 (safe) to 1 (danger) using calibrated thresholds, 
+        then multiplied by its weight to produce a base probability.
+        
+        **Leading Indicators (base weights)**
+        - **Yield Curve (20%)**: 10Y − 2Y CGS spread from RBA F2. Inversion (negative) is a leading recession signal.
+        - **Iron Ore (15%)**: USD spot price. Sustained weakness below $85 signals Chinese demand slowdown and commodity income shock.
+        - **Unemployment (15%)**: ABS Labour Force. Rising unemployment feeds directly into demand contraction.
+        - **Real Wage Growth (12%)**: WPI minus headline CPI. Persistent negative real wages erode household consumption.
+        - **GDP q/q (12%)**: ABS National Accounts. Technical recession requires two consecutive negative quarters.
+        - **Insolvency Rate (10%)**: ASIC corporate insolvencies as a share of registered companies.
+        - **ANZ Job Ads (8%)**: Month-on-month % change in job advertisements. Leading indicator for future employment.
+        - **Trimmed CPI (8%)**: RBA's preferred underlying inflation measure. Persistently high inflation forces rate holds that restrain growth.
+        
+        **Note on Trimmed CPI**: Oil price movements are captured solely via the **Geopolitical (Brent Crude)** overlay. 
+        Trimmed CPI does not receive an oil passthrough adjustment — the trimmed mean explicitly excludes extreme price 
+        movements and is not mechanically linked to energy shocks in the same way as headline CPI.
         
         *Overlays*: Brent Crude shocks, Consumer Sentiment crashes, Media Panic signals, and US Prediction Market odds add discrete penalty multipliers to the base score.
-        The **Kalshi overlay** is applied only when US recession odds exceed 25% (above normal expansion baseline), scaling at +0.5 AU pts per 1 US pt, capped at +15 pts.
-        All signals are derived direct from official endpoints (ABS, RBA, ASIC) and priced daily using market futures.
+        The **Kalshi overlay** is applied only when US recession odds exceed 25% (above normal expansion baseline), scaling at +0.5 AU pts per 1 US pt, capped at +12 pts.
+        All signals are derived direct from official endpoints (ABS, RBA, ASIC) and updated daily.
         """)
 
 if __name__ == "__main__":

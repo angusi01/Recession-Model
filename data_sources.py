@@ -17,6 +17,8 @@ logger = logging.getLogger(__name__)
 # Fallback cache in case of API/scrape failure
 # This ensures the app never crashes
 FALLBACKS = {
+    "yield_curve": 0.1,
+    "iron_ore": 90.0,
     "gdp_qq": 0.2,
     "unemployment": 4.1,
     "cpi_headline": 4.1,
@@ -24,6 +26,7 @@ FALLBACKS = {
     "cash_rate": 4.35,
     "real_wage_growth": 0.1,
     "insolvency_rate": 0.35,
+    "anz_job_ads": -5.0,
     "brent_crude": 80.0,
     "asx_cash_rate": 4.35,
     "westpac_sentiment": 82.0,
