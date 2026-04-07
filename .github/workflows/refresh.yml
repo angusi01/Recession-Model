@@ -1,7 +1,8 @@
 # Daily Cache Refresh Workflow
 # Pings the deployed Streamlit Cloud URL daily to keep the app alive and
-# warm the cache. The -k flag bypasses SSL verification to handle transient
-# TLS handshake errors (exit code 47) from the Streamlit Cloud endpoint.
+# warm the cache.
+# continue-on-error is used so CI stays green even when Streamlit Cloud
+# temporarily redirects (e.g. wake-up splash) or returns a non-200 response.
 
 name: Daily Cache Refresh
 
@@ -16,4 +17,5 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Ping Streamlit App
-        run: curl -sL -k https://ausrecessionodds.streamlit.app > /dev/null
+        continue-on-error: true
+        run: curl -sL -k --max-redirs 10 https://ausrecessionodds.streamlit.app > /dev/null
