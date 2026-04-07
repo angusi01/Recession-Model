@@ -48,6 +48,7 @@ URLS = {
     "abs_base": "https://api.data.abs.gov.au/data/",
     "rba_cash_rate": "https://www.rba.gov.au/statistics/tables/csv/f1-data.csv",
     "rba_yield_curve": "https://www.rba.gov.au/statistics/tables/csv/f2-data.csv",
+    "rba_commodity_prices": "https://www.rba.gov.au/statistics/tables/csv/i2-data.csv",
     "rba_inflation_exp": "https://www.rba.gov.au/statistics/tables/csv/g3-data.csv",
     "asic_insolvency": "https://asic.gov.au/online-services/search-registries/insolvency-statistics/",
     "asx_rate_tracker": "https://www.asx.com.au/markets/trade-our-derivatives-market/futures-market/rba-rate-tracker",

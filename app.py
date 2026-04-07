@@ -75,7 +75,7 @@ def main():
 
         raw_data = {
             "yield_curve": yield_curve_val,
-            "iron_ore": fetch_rba_csv(URLS["rba_cash_rate"], "Iron ore", "iron_ore"),
+            "iron_ore": fetch_rba_csv(URLS["rba_commodity_prices"], "Iron ore", "iron_ore"),
             "gdp_qq": fetch_abs_data("NA/1.1.1.20.Q", "gdp_qq"),
             "unemployment": fetch_abs_data("LF/1.3.1599.20.M", "unemployment"),
             "cpi_trimmed": fetch_abs_data("CPI/1.10002.10.20.Q", "cpi_trimmed"),
