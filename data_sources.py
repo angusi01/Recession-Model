@@ -74,6 +74,29 @@ def fetch_rba_csv(url, target_col, fallback_key):
         return FALLBACKS[fallback_key]
 
 @st.cache_data(ttl=TTL["daily"], show_spinner=False)
+def fetch_yield_curve_spread(url):
+    """Fetch 10Y minus 2Y CGS spread from RBA F2 table.
+
+    Fetches both legs from the same CSV in a single pass.  If either leg is
+    missing or the CSV cannot be parsed, the spread falls back to
+    FALLBACKS['yield_curve'] so that a partial failure cannot produce an
+    invalid spread (e.g. a yield level minus a spread fallback).
+    """
+    try:
+        df = pd.read_csv(url, skiprows=10)
+        df_spread = df.dropna(subset=["FCMYGBAG10D", "FCMYGBAG2D"])
+        if df_spread.empty:
+            log_failure("RBA Yield Curve (spread)", "no rows contain both 10Y and 2Y legs after dropna")
+            return FALLBACKS["yield_curve"]
+        latest_row = df_spread.iloc[-1]
+        cgs_10y = float(latest_row["FCMYGBAG10D"])
+        cgs_2y = float(latest_row["FCMYGBAG2D"])
+        return cgs_10y - cgs_2y
+    except Exception as e:
+        log_failure("RBA Yield Curve (spread)", repr(e))
+        return FALLBACKS["yield_curve"]
+
+@st.cache_data(ttl=TTL["daily"], show_spinner=False)
 def fetch_asic_insolvency():
     """Scrape ASIC insolvency data to calculate rate."""
     url = URLS["asic_insolvency"]

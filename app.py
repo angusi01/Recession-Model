@@ -7,7 +7,7 @@ import time
 from config import THRESHOLDS, WEIGHTS, URLS
 from data_sources import (
     fetch_abs_data, fetch_rba_csv, fetch_asic_insolvency,
-    fetch_brent_crude, fetch_asx_futures, fetch_westpac_sentiment,
+    fetch_brent_crude, fetch_westpac_sentiment, fetch_yield_curve_spread,
     fetch_google_trends, fetch_official_keywords, fetch_kalshi_recession_odds
 )
 from model import calculate_total_probability
@@ -69,9 +69,7 @@ def main():
         trends_val, trends_err = fetch_google_trends()
 
         # Yield curve: 10-year CGS minus 2-year CGS (RBA F2 table)
-        cgs_10y = fetch_rba_csv(URLS["rba_yield_curve"], "FCMYGBAG10D", "yield_curve")
-        cgs_2y = fetch_rba_csv(URLS["rba_yield_curve"], "FCMYGBAG2D", "yield_curve")
-        yield_curve_val = cgs_10y - cgs_2y
+        yield_curve_val = fetch_yield_curve_spread(URLS["rba_yield_curve"])
 
         raw_data = {
             "yield_curve": yield_curve_val,
@@ -83,7 +81,6 @@ def main():
             "insolvency_rate": fetch_asic_insolvency(),
             "anz_job_ads": -5.0,  # TODO: replace with live ANZ Job Ads m/m % change when feed is available
             "brent_crude": fetch_brent_crude(),
-            "asx_cash_rate": fetch_asx_futures(),
             "westpac_sentiment": fetch_westpac_sentiment(),
             "google_trends": trends_val,
             "keyword_hits": fetch_official_keywords(),
@@ -183,11 +180,11 @@ def main():
                 if val >= safe: return "🟠"
             return "🟢"
             
-        st.markdown(f"{trip_status(yc_val, -0.3, 0.2, True)} **Yield Curve** ({yc_val:.2f}%)")
-        st.markdown(f"{trip_status(io_val, 70.0, 85.0, True)} **Iron Ore** (${io_val:.0f})")
-        st.markdown(f"{trip_status(gdp_val, -0.2, 0.2, True)} **GDP q/q** ({gdp_val:.1f}%)")
-        st.markdown(f"{trip_status(unemp_val, 5.0, 4.5)} **Unemployment** ({unemp_val:.1f}%)")
-        st.markdown(f"{trip_status(anz_val, -15.0, -5.0, True)} **ANZ Job Ads** ({anz_val:+.1f}%)")
+        st.markdown(f"{trip_status(yc_val, THRESHOLDS['yield_curve']['danger'], THRESHOLDS['yield_curve']['safe'], THRESHOLDS['yield_curve']['lower_is_worse'])} **Yield Curve** ({yc_val:.2f}%)")
+        st.markdown(f"{trip_status(io_val, THRESHOLDS['iron_ore']['danger'], THRESHOLDS['iron_ore']['safe'], THRESHOLDS['iron_ore']['lower_is_worse'])} **Iron Ore** (${io_val:.0f})")
+        st.markdown(f"{trip_status(gdp_val, THRESHOLDS['gdp_qq']['danger'], THRESHOLDS['gdp_qq']['safe'], THRESHOLDS['gdp_qq']['lower_is_worse'])} **GDP q/q** ({gdp_val:.1f}%)")
+        st.markdown(f"{trip_status(unemp_val, THRESHOLDS['unemployment']['danger'], THRESHOLDS['unemployment']['safe'], THRESHOLDS['unemployment']['lower_is_worse'])} **Unemployment** ({unemp_val:.1f}%)")
+        st.markdown(f"{trip_status(anz_val, THRESHOLDS['anz_job_ads']['danger'], THRESHOLDS['anz_job_ads']['safe'], THRESHOLDS['anz_job_ads']['lower_is_worse'])} **ANZ Job Ads** ({anz_val:+.1f}%)")
         
     st.divider()
 
@@ -223,9 +220,9 @@ def main():
     with col_sources:
         st.subheader("Data Sources")
         source_df = pd.DataFrame({
-            "Source": ["ABS", "RBA", "ASIC", "ASX", "Alpha Vantage", "Westpac", "Google Trends", "Gov Media", "Kalshi"],
-            "Description": ["Economic Data", "Cash Rate", "Insolvencies", "Futures", "Brent Crude", "Sentiment", "Keyword Volume", "Signals", "US Recession Market"],
-            "Status": ["Active"] * 9
+            "Source": ["ABS", "RBA", "ASIC", "Alpha Vantage", "Westpac", "Google Trends", "Gov Media", "Kalshi"],
+            "Description": ["Economic Data", "Yield Curve & Commodities", "Insolvencies", "Brent Crude", "Sentiment", "Keyword Volume", "Signals", "US Recession Market"],
+            "Status": ["Active"] * 8
         })
         st.dataframe(source_df, hide_index=True, use_container_width=True)
 
