@@ -84,6 +84,9 @@ def fetch_yield_curve_spread(url):
     """
     try:
         df = pd.read_csv(url, skiprows=10)
+        # Sort by the date column (first column) so iloc[-1] always returns the
+        # most recent observation regardless of how the CSV is ordered.
+        df = df.sort_values(by=df.columns[0], ascending=True).reset_index(drop=True)
         df_spread = df.dropna(subset=["FCMYGBAG10D", "FCMYGBAG2D"])
         if df_spread.empty:
             log_failure("RBA Yield Curve (spread)", "no rows contain both 10Y and 2Y legs after dropna")
