@@ -38,24 +38,47 @@ FALLBACKS = {
 def log_failure(source_name, error=""):
     logger.warning(f"Failed to fetch {source_name}: {error}. Using fallback.")
 
+def _fetch_abs_series(series_id):
+    """Fetch a single ABS SDMX series and return the latest float value.
+
+    Raises on any failure so the caller can decide how to handle it.
+    This is an internal helper — use fetch_abs_data() for individual
+    series with automatic fallback, or fetch_real_wage_growth() for
+    derived metrics that need atomic two-series fetching.
+    """
+    url = f"{URLS['abs_base']}{series_id}?format=jsondata"
+    response = requests.get(url, timeout=10, headers={"Accept": "application/vnd.sdmx.data+json"})
+    response.raise_for_status()
+    data = response.json()
+    observations = data["data"]["dataSets"][0]["series"]["0:0:0:0:0"]["observations"]
+    latest_key = max(observations.keys(), key=lambda x: int(x))
+    return float(observations[latest_key][0])
+
 @st.cache_data(ttl=TTL["daily"], show_spinner=False)
 def fetch_abs_data(series_id, fallback_key):
-    """Fetch data from the ABS API."""
-    url = f"{URLS['abs_base']}{series_id}?format=jsondata"
+    """Fetch a single ABS series, returning a fallback value on any failure."""
     try:
-        response = requests.get(url, timeout=10, headers={"Accept": "application/vnd.sdmx.data+json"})
-        response.raise_for_status()
-        data = response.json()
-        
-        # Parse standard ABS SDMX JSON structure based on prompt
-        observations = data["data"]["dataSets"][0]["series"]["0:0:0:0:0"]["observations"]
-        # Find the max key (latest observation)
-        latest_key = max(observations.keys(), key=lambda x: int(x))
-        latest_value = observations[latest_key][0]
-        return float(latest_value)
+        return _fetch_abs_series(series_id)
     except Exception as e:
         log_failure(f"ABS ({series_id})", repr(e))
         return FALLBACKS[fallback_key]
+
+@st.cache_data(ttl=TTL["daily"], show_spinner=False)
+def fetch_real_wage_growth():
+    """Fetch real wage growth (WPI minus headline CPI) as a single atomic operation.
+
+    Both ABS series are fetched inside one try/except so a partial failure
+    (either leg succeeds while the other fails) cannot produce a hybrid value
+    that silently distorts the model.  If either fetch fails the whole
+    calculation falls back to FALLBACKS["real_wage_growth"].
+    """
+    try:
+        wpi = _fetch_abs_series("WPI/1.3.999901.20.Q")
+        cpi = _fetch_abs_series("CPI/1.10001.10.20.Q")
+        return wpi - cpi
+    except Exception as e:
+        log_failure("ABS Real Wage Growth (WPI - CPI)", repr(e))
+        return FALLBACKS["real_wage_growth"]
 
 @st.cache_data(ttl=TTL["daily"], show_spinner=False)
 def fetch_rba_csv(url, target_col, fallback_key):
@@ -219,7 +242,7 @@ def fetch_google_trends():
         return cache_data["value"], False
         
     try:
-        pytrends = TrendReq(hl='en-US', tz=360, timeout=(10,25))
+        pytrends = TrendReq(hl='en-US', tz=360, timeout=(5,10))
         kw_list = ["recession australia", "job losses australia", "mortgage stress", "fuel prices australia"]
         pytrends.build_payload(kw_list, cat=0, timeframe='today 3-m', geo='AU')
         data = pytrends.interest_over_time()
@@ -250,8 +273,8 @@ def fetch_google_trends():
 def fetch_kalshi_recession_odds():
     """Fetch US recession 2026 implied probability from Kalshi's public JSON API.
     
-    Uses the midpoint of bid/ask in dollar terms so prices are unauthenticated
-    (public endpoint). Returns a percentage 0-100.
+    Uses the midpoint of bid/ask so prices are unauthenticated (public endpoint).
+    Returns a percentage 0-100.
     """
     try:
         url = URLS["kalshi_recession"]
@@ -259,14 +282,17 @@ def fetch_kalshi_recession_odds():
         resp.raise_for_status()
         market = resp.json().get("market", {})
         
-        yes_bid = market.get("yes_bid_dollars")
-        yes_ask = market.get("yes_ask_dollars")
+        # Support both old field names (yes_bid_dollars / yes_ask_dollars, range 0-1)
+        # and new field names (yes_bid / yes_ask, range 0-99 cents).
+        if market.get("yes_bid_dollars") is not None and market.get("yes_ask_dollars") is not None:
+            midpoint = (float(market["yes_bid_dollars"]) + float(market["yes_ask_dollars"])) / 2.0
+            return round(midpoint * 100, 2)  # Convert 0-1 to percentage
         
-        if yes_bid is None or yes_ask is None:
-            raise ValueError(f"Missing price fields. Market keys: {list(market.keys())[:10]}")
+        if market.get("yes_bid") is not None and market.get("yes_ask") is not None:
+            midpoint = (float(market["yes_bid"]) + float(market["yes_ask"])) / 2.0
+            return round(midpoint, 2)  # Already in percentage (0-99)
         
-        midpoint = (float(yes_bid) + float(yes_ask)) / 2.0
-        return round(midpoint * 100, 2)  # Convert dollars (0-1) to percentage
+        raise ValueError(f"Missing price fields. Market keys: {list(market.keys())[:10]}")
     except Exception as e:
         log_failure("Kalshi US Recession Odds", repr(e))
         return FALLBACKS["kalshi_recession"]

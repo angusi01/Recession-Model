@@ -60,7 +60,7 @@ URLS = {
         "https://www.pm.gov.au/media",
         "https://www.abc.net.au/news/business/economy"
     ],
-    "kalshi_recession": "https://api.elections.kalshi.com/trade-api/v2/markets/KXRECSSNBER-26"
+    "kalshi_recession": "https://trading-api.kalshi.com/trade-api/v2/markets/KXRECSSNBER-26"
 }
 
 # Official Keyword Targets

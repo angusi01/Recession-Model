@@ -8,7 +8,8 @@ from config import THRESHOLDS, WEIGHTS, URLS
 from data_sources import (
     fetch_abs_data, fetch_rba_csv, fetch_asic_insolvency,
     fetch_brent_crude, fetch_westpac_sentiment, fetch_yield_curve_spread,
-    fetch_google_trends, fetch_official_keywords, fetch_kalshi_recession_odds
+    fetch_google_trends, fetch_official_keywords, fetch_kalshi_recession_odds,
+    fetch_real_wage_growth
 )
 from model import calculate_total_probability
 from history import get_and_update_history
@@ -77,7 +78,7 @@ def main():
             "gdp_qq": fetch_abs_data("NA/1.1.1.20.Q", "gdp_qq"),
             "unemployment": fetch_abs_data("LF/1.3.1599.20.M", "unemployment"),
             "cpi_trimmed": fetch_abs_data("CPI/1.10002.10.20.Q", "cpi_trimmed"),
-            "real_wage_growth": fetch_abs_data("WPI/1.3.999901.20.Q", "real_wage_growth") - fetch_abs_data("CPI/1.10001.10.20.Q", "cpi_headline"),
+            "real_wage_growth": fetch_real_wage_growth(),
             "insolvency_rate": fetch_asic_insolvency(),
             "anz_job_ads": -5.0,  # TODO: replace with live ANZ Job Ads m/m % change when feed is available
             "brent_crude": fetch_brent_crude(),
@@ -136,7 +137,7 @@ def main():
         try:
             img_bytes = fig_gauge.to_image(format="png", engine="kaleido")
             st.sidebar.download_button("📸 Download Gauge (PNG)", data=img_bytes, file_name=f"recession_gauge_{datetime.now().strftime('%Y%m%d')}.png", mime="image/png")
-        except ImportError:
+        except (ImportError, ValueError):
             st.sidebar.caption("📸 PNG export unavailable — install `kaleido` to enable.")
         except Exception:
             pass # export failed for another transient reason
