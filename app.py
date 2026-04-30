@@ -136,8 +136,10 @@ def main():
         try:
             img_bytes = fig_gauge.to_image(format="png", engine="kaleido")
             st.sidebar.download_button("📸 Download Gauge (PNG)", data=img_bytes, file_name=f"recession_gauge_{datetime.now().strftime('%Y%m%d')}.png", mime="image/png")
+        except ImportError:
+            st.sidebar.caption("📸 PNG export unavailable — install `kaleido` to enable.")
         except Exception:
-            pass # kaleido may not be installed
+            pass # export failed for another transient reason
             
         csv_bytes = pd.DataFrame([adjusted_data]).to_csv(index=False).encode('utf-8')
         st.sidebar.download_button("📊 Download Raw Data (CSV)", data=csv_bytes, file_name=f"recession_data_{datetime.now().strftime('%Y%m%d')}.csv", mime="text/csv")

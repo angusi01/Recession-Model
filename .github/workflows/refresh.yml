@@ -1,8 +1,9 @@
 # Daily Cache Refresh Workflow
 # Pings the deployed Streamlit Cloud URL daily to keep the app alive and
 # warm the cache.
-# continue-on-error is used so CI stays green even when Streamlit Cloud
-# temporarily redirects (e.g. wake-up splash) or returns a non-200 response.
+# Hard failures (DNS/connection/timeout) are fatal so CI turns red and the
+# problem is visible.  Redirect chains and non-200 HTTP responses are treated
+# as expected wake-up behaviour and only produce a warning.
 
 name: Daily Cache Refresh
 
@@ -17,5 +18,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Ping Streamlit App
-        continue-on-error: true
-        run: curl -sL -k --max-redirs 10 https://ausrecessionodds.streamlit.app > /dev/null
+        run: |
+          HTTP_CODE=$(curl -o /dev/null -w "%{http_code}" -sL -k --max-redirs 10 \
+            --connect-timeout 15 --max-time 30 \
+            https://ausrecessionodds.streamlit.app) || CURL_EXIT=$?
+          CURL_EXIT=${CURL_EXIT:-0}
+          echo "curl exit code : $CURL_EXIT"
+          echo "HTTP status    : $HTTP_CODE"
+          # curl exit codes 6 (DNS) and 28 (timeout) indicate a hard failure
+          if [ "$CURL_EXIT" -eq 6 ] || [ "$CURL_EXIT" -eq 28 ]; then
+            echo "::error::Hard failure pinging app (curl exit $CURL_EXIT). App may be down."
+            exit 1
+          fi
+          # Warn (but keep green) for any other non-zero exit or non-2xx HTTP
+          if [ "$CURL_EXIT" -ne 0 ]; then
+            echo "::warning::Ping returned curl exit $CURL_EXIT (HTTP $HTTP_CODE) — may be a redirect or wake-up splash."
+          elif [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+            echo "::warning::Ping returned HTTP $HTTP_CODE — app may be waking up."
+          else
+            echo "Ping succeeded (HTTP $HTTP_CODE)."
+          fi
