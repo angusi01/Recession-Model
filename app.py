@@ -319,9 +319,9 @@ def main():
         live_data = {
             "yield_curve": yield_curve_val,
             "iron_ore": fetch_rba_csv(URLS["rba_commodity_prices"], "Iron ore", "iron_ore"),
-            "gdp_qq": fetch_abs_data("NA/1.1.1.20.Q", "gdp_qq"),
-            "unemployment": fetch_abs_data("LF/1.3.1599.20.M", "unemployment"),
-            "cpi_trimmed": fetch_abs_data("CPI/1.10002.10.20.Q", "cpi_trimmed"),
+            "gdp_qq": fetch_abs_data("ANA_AGG/M2.GPM.20.AUS.Q", "gdp_qq"),
+            "unemployment": fetch_abs_data("LF/M13.3.1599.20.AUS.M", "unemployment"),
+            "cpi_trimmed": fetch_abs_data("CPI/3.999902.20.50.Q", "cpi_trimmed"),
             "real_wage_growth": fetch_real_wage_growth(),
             "insolvency_rate": fetch_asic_insolvency(),
             "brent_crude": fetch_brent_crude(),

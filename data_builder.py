@@ -24,15 +24,15 @@ import streamlit as st
 logger = logging.getLogger(__name__)
 
 # ── Constants ────────────────────────────────────────────────────────────────
-ABS_BASE = "https://api.data.abs.gov.au/data/"
+ABS_BASE = "https://data.api.abs.gov.au/rest/data/"
 RBA_F1_URL = "https://www.rba.gov.au/statistics/tables/csv/f1-data.csv"
 RBA_F2_URL = "https://www.rba.gov.au/statistics/tables/csv/f2-data.csv"
 RBA_I2_URL = "https://www.rba.gov.au/statistics/tables/csv/i2-data.csv"
 
-# ABS series IDs
-GDP_QQ_SERIES = "NA/1.1.1.20.Q"         # GDP % change q/q
-UNEMPLOYMENT_SERIES = "LF/1.3.1599.20.M"  # Unemployment rate, monthly
-CPI_TRIMMED_SERIES = "CPI/1.10002.10.20.Q"  # Trimmed mean CPI, quarterly
+# ABS series IDs (new SDMX API format)
+GDP_QQ_SERIES = "ANA_AGG/M2.GPM.20.AUS.Q"          # GDP % change q/q, seasonally adjusted
+UNEMPLOYMENT_SERIES = "LF/M13.3.1599.20.AUS.M"     # Unemployment rate, monthly, persons, SA
+CPI_TRIMMED_SERIES = "CPI/3.999902.20.50.Q"         # Trimmed mean CPI, YoY %, seasonally adjusted
 
 # RBA column names
 RBA_10Y_COL = "FCMYGBAG10D"   # F2: 10-year CGS yield
@@ -293,9 +293,9 @@ def build_feature_matrix() -> dict:
       'recession' : pd.Series  monthly binary recession label (for display)
     """
     # ── 1. Fetch raw series ──────────────────────────────────────────────────
-    gdp_qq_q = fetch_abs_full_series(GDP_QQ_SERIES)          # quarterly
-    unemp_m = fetch_abs_full_series(UNEMPLOYMENT_SERIES)     # monthly
-    cpi_q = fetch_abs_full_series(CPI_TRIMMED_SERIES)        # quarterly
+    gdp_qq_q = fetch_abs_full_series(GDP_QQ_SERIES)                        # quarterly
+    unemp_m = fetch_abs_full_series(UNEMPLOYMENT_SERIES, "1989-01")        # monthly
+    cpi_q = fetch_abs_full_series(CPI_TRIMMED_SERIES)                      # quarterly
 
     rba_yields = fetch_rba_yield_history()   # daily DataFrame
     iron_ore_d = fetch_rba_iron_ore_history()  # daily/monthly Series

@@ -51,12 +51,12 @@ PRE_WAR_BRENT_BASELINE = 63.0
 
 # Data Source URLs
 URLS = {
-    "abs_base": "https://api.data.abs.gov.au/data/",
+    "abs_base": "https://data.api.abs.gov.au/rest/data/",
     "rba_cash_rate": "https://www.rba.gov.au/statistics/tables/csv/f1-data.csv",
     "rba_yield_curve": "https://www.rba.gov.au/statistics/tables/csv/f2-data.csv",
     "rba_commodity_prices": "https://www.rba.gov.au/statistics/tables/csv/i2-data.csv",
     "rba_inflation_exp": "https://www.rba.gov.au/statistics/tables/csv/g3-data.csv",
-    "asic_insolvency": "https://asic.gov.au/online-services/search-registries/insolvency-statistics/",
+    "asic_insolvency": "https://asic.gov.au/about-asic/corporate-publications/statistics/insolvency-statistics/",
     "asx_rate_tracker": "https://www.asx.com.au/markets/trade-our-derivatives-market/futures-market/rba-rate-tracker",
     "westpac_mics": "https://www.westpac.com.au/about-westpac/media/media-releases/",
     "alphavantage": "https://www.alphavantage.co/query",
