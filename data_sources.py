@@ -50,7 +50,9 @@ def _fetch_abs_series(series_id):
     response = requests.get(url, timeout=10, headers={"Accept": "application/vnd.sdmx.data+json"})
     response.raise_for_status()
     data = response.json()
-    observations = data["data"]["dataSets"][0]["series"]["0:0:0:0:0"]["observations"]
+    series_data = data["data"]["dataSets"][0]["series"]
+    series_key = list(series_data.keys())[0]
+    observations = series_data[series_key]["observations"]
     latest_key = max(observations.keys(), key=lambda x: int(x))
     return float(observations[latest_key][0])
 
@@ -73,8 +75,8 @@ def fetch_real_wage_growth():
     calculation falls back to FALLBACKS["real_wage_growth"].
     """
     try:
-        wpi = _fetch_abs_series("WPI/1.3.999901.20.Q")
-        cpi = _fetch_abs_series("CPI/1.10001.10.20.Q")
+        wpi = _fetch_abs_series("WPI/3.THRPEB.7.TOT.10.AUS.Q")
+        cpi = _fetch_abs_series("CPI/3.10001.10.50.Q")
         return wpi - cpi
     except Exception as e:
         log_failure("ABS Real Wage Growth (WPI - CPI)", repr(e))
@@ -86,10 +88,16 @@ def fetch_rba_csv(url, target_col, fallback_key):
     try:
         # RBA CSVs usually have 10 rows of metadata
         df = pd.read_csv(url, skiprows=10)
+        # Find the column by exact match first, then case-insensitive partial match
+        col = target_col if target_col in df.columns else next(
+            (c for c in df.columns if target_col.lower() in c.lower()), None
+        )
+        if col is None:
+            raise KeyError([target_col])
         # Drop rows where the target column is NaN, then get the last value
-        df = df.dropna(subset=[target_col])
+        df = df.dropna(subset=[col])
         if not df.empty:
-            latest_val = df[target_col].iloc[-1]
+            latest_val = df[col].iloc[-1]
             return float(latest_val)
         return FALLBACKS[fallback_key]
     except Exception as e:
