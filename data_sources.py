@@ -93,7 +93,7 @@ def fetch_rba_csv(url, target_col, fallback_key):
             (c for c in df.columns if target_col.lower() in c.lower()), None
         )
         if col is None:
-            raise KeyError([target_col])
+            raise KeyError(f"Column '{target_col}' not found. Available columns: {list(df.columns)}")
         # Drop rows where the target column is NaN, then get the last value
         df = df.dropna(subset=[col])
         if not df.empty:
