@@ -197,8 +197,10 @@ def fetch_asx200_history() -> pd.Series:
 def label_recessions_quarterly(gdp_qq: pd.Series) -> pd.Series:
     """
     Label quarters as in-recession based on 2+ consecutive negative GDP growth quarters.
-    A quarter is labelled 1 if it AND the previous quarter both had negative growth.
-    Extends the label back one quarter to capture the full contiguous streak.
+
+    When two consecutive quarters both show negative GDP growth, both are marked as
+    recession quarters (1). This means quarter i is labelled 1 if gdp[i] < 0 and
+    gdp[i-1] < 0, and additionally quarter i-1 is retroactively labelled 1.
 
     Returns a binary pd.Series with the same quarterly PeriodIndex as gdp_qq.
     """
@@ -377,6 +379,11 @@ def build_feature_matrix() -> dict:
     # unemployment: lag 1 month
     if "unemployment_raw" in df.columns:
         df["unemployment"] = df["unemployment_raw"].shift(1)
+
+    # Drop the raw (unlagged) columns now that lagged versions have been created.
+    # Keeping them would risk accidental use and wastes memory.
+    df.drop(columns=["gdp_qq_raw", "cpi_trimmed_raw", "unemployment_raw"],
+            errors="ignore", inplace=True)
 
     # ── 7. Compute derived features ──────────────────────────────────────────
     if "yield_curve_slope" in df.columns:

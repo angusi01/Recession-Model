@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 MIN_TRAIN_MONTHS = 60        # 5 years minimum training window
-RETRAIN_INTERVAL = 6         # re-train every N months during walk-forward
+RETRAIN_INTERVAL = 6         # re-train every N months during walk-forward backtest
 GB_PARAMS = dict(
     n_estimators=60,
     max_depth=2,
@@ -164,7 +164,8 @@ def walk_forward_predict(
         return pd.DataFrame()
 
     df = pd.DataFrame(records).set_index("date")
-    # Ensemble = mean of LR and GB where both are available
+    # Ensemble = mean of LR and GB; if one model returned NaN (failed), the
+    # other model's value is used automatically (pandas skipna=True by default).
     df["p_ens_3m"] = df[["p_lr_3m", "p_gb_3m"]].mean(axis=1)
     df["p_ens_6m"] = df[["p_lr_6m", "p_gb_6m"]].mean(axis=1)
     return df
@@ -373,8 +374,9 @@ def compute_backtest_metrics(wf_df: pd.DataFrame) -> dict[str, Any]:
         onset_dates = y3.index[transitions]
 
         for onset in onset_dates:
-            # Look back up to 12 months before onset
-            lookback = wf_df.loc[:onset].tail(13).head(-1)  # exclude onset itself
+            # Take up to 12 months before onset:
+            # tail(13) = onset + 12 prior months; iloc[:-1] drops the onset month itself.
+            lookback = wf_df.loc[:onset].iloc[-13:-1]
             above_50 = lookback[lookback["p_ens_3m"] >= 0.5]
             if not above_50.empty:
                 # Earliest month with probability >= 50%
