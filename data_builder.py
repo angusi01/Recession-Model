@@ -31,8 +31,8 @@ RBA_I2_URL = "https://www.rba.gov.au/statistics/tables/csv/i2-data.csv"
 
 # ABS series IDs (new SDMX API format)
 GDP_QQ_SERIES = "ANA_AGG/M2.GPM.20.AUS.Q"          # GDP % change q/q, seasonally adjusted
-UNEMPLOYMENT_SERIES = "LF/M13.3.1599.20.AUS.M"     # Unemployment rate, monthly, persons, SA
-CPI_TRIMMED_SERIES = "CPI/3.999902.20.50.Q"         # Trimmed mean CPI, YoY %, seasonally adjusted
+UNEMPLOYMENT_SERIES = "LF/3.1.15.1599.20.M"        # Unemployment rate, monthly, persons, SA
+CPI_TRIMMED_SERIES = "CPI/3.999902.20.Q"            # Trimmed mean CPI, YoY %, seasonally adjusted
 
 # RBA column names
 RBA_10Y_COL = "FCMYGBAG10D"   # F2: 10-year CGS yield
@@ -48,28 +48,28 @@ HISTORY_START = "1989-01-01"   # how far back to pull market data
 
 def _parse_abs_json(data: dict) -> pd.Series:
     """
-    Parse ABS SDMX JSON response into a pd.Series with PeriodIndex.
+    Parse ABS SDMX JSON response (new flat observations format) into a pd.Series with PeriodIndex.
+
+    The new ABS Data API (post-November 2024) returns observations in a flat dict at
+    dataSets[0]["observations"] when dimensionAtObservation=AllDimensions is used.
+    Keys are colon-separated dimension indices (e.g. "0:0:0:0:N") where N is the
+    time-period index within the TIME_PERIOD dimension's values list.
+
     Handles both monthly (e.g. '2023-09') and quarterly (e.g. '2023-Q3') dates.
     """
-    try:
-        structure = data["data"]["structure"]
-        dims = structure["dimensions"]["observation"]
-        time_dim = next((d for d in dims if d["id"] == "TIME_PERIOD"), dims[-1])
-        time_periods = [v["id"] for v in time_dim["values"]]
-    except (KeyError, IndexError, StopIteration):
-        # Fallback: try 'series' dimension time labels
-        time_periods = []
+    dims = data["data"]["structure"]["dimensions"]["observation"]
+    time_dim = next((d for d in dims if d["id"] == "TIME_PERIOD"), dims[-1])
+    time_pos = time_dim["keyPosition"]
+    time_periods = [v["id"] for v in time_dim["values"]]
 
-    series_data = data["data"]["dataSets"][0]["series"]
-    series_key = list(series_data.keys())[0]
-    obs = series_data[series_key]["observations"]
+    observations = data["data"]["dataSets"][0]["observations"]
 
     records = {}
-    for k, v_list in obs.items():
-        idx = int(k)
-        val = v_list[0] if v_list else None
-        if val is not None and idx < len(time_periods):
-            records[time_periods[idx]] = float(val)
+    for key, val_list in observations.items():
+        indices = list(map(int, key.split(":")))
+        time_idx = indices[time_pos]
+        if time_idx < len(time_periods) and val_list and val_list[0] is not None:
+            records[time_periods[time_idx]] = float(val_list[0])
 
     if not records:
         raise ValueError("No observations found in ABS SDMX response")
@@ -91,12 +91,17 @@ def _parse_abs_json(data: dict) -> pd.Series:
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_abs_full_series(series_id: str, start_period: str = "1989-Q1") -> pd.Series:
-    """Fetch full historical ABS SDMX series as a pd.Series with PeriodIndex."""
-    url = f"{ABS_BASE}{series_id}?format=jsondata&startPeriod={start_period}"
+    """Fetch full historical ABS SDMX series as a pd.Series with PeriodIndex.
+
+    Uses the new ABS Data API format (post-November 2024):
+    - Accept: application/json
+    - dimensionAtObservation=AllDimensions for consistent flat observations format
+    """
+    url = f"{ABS_BASE}{series_id}?dimensionAtObservation=AllDimensions&startPeriod={start_period}"
     try:
         resp = requests.get(
             url, timeout=30,
-            headers={"Accept": "application/vnd.sdmx.data+json"}
+            headers={"Accept": "application/json"}
         )
         resp.raise_for_status()
         return _parse_abs_json(resp.json())
@@ -159,7 +164,10 @@ def fetch_rba_iron_ore_history() -> pd.Series:
         df.index = pd.to_datetime(df.index, errors="coerce")
         df = df[df.index.notna()].sort_index()
         col = next(
-            (c for c in df.columns if "iron ore" in c.lower() or c == RBA_IRON_ORE_COL),
+            (c for c in df.columns if "iron ore" in c.lower()
+             or c == RBA_IRON_ORE_COL
+             or "pciron" in c.lower()
+             or c.lower().startswith("iron")),
             None,
         )
         if col is None:
