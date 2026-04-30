@@ -116,7 +116,7 @@ def display_probability_trend(wf_df: pd.DataFrame, recession_series: pd.Series) 
                 )
                 in_rec = False
         if in_rec and rec_start is not None:
-            fig.add_vrect(x0=rec_start, x1=dates.iloc[-1], fillcolor="rgba(220,50,50,0.15)", line_width=0)
+            fig.add_vrect(x0=rec_start, x1=dates[-1], fillcolor="rgba(220,50,50,0.15)", line_width=0)
 
     # 50% threshold line
     fig.add_hline(y=50, line_dash="dash", line_color="orange",

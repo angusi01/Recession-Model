@@ -282,7 +282,17 @@ def get_current_forecast(
       p_gb_6m       : GB raw probability
       feature_importance : dict of {feature_name: importance}  (from LR coefficients)
     """
-    if current_row is None or models.get("lr_3m") is None:
+    if current_row is None:
+        return {
+            "p_3m": None, "p_6m": None,
+            "p_lr_3m": None, "p_gb_3m": None,
+            "p_lr_6m": None, "p_gb_6m": None,
+            "feature_importance": {},
+        }
+
+    # Check that at least one model exists for either horizon before continuing
+    if models.get("lr_3m") is None and models.get("gb_3m") is None \
+            and models.get("lr_6m") is None and models.get("gb_6m") is None:
         return {
             "p_3m": None, "p_6m": None,
             "p_lr_3m": None, "p_gb_3m": None,

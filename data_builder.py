@@ -218,23 +218,30 @@ def label_recessions_quarterly(gdp_qq: pd.Series) -> pd.Series:
 
 def resample_quarterly_to_monthly(q_series: pd.Series) -> pd.Series:
     """
-    Convert a quarterly PeriodIndex series to monthly by forward-filling.
-    The quarterly value is placed at the END of the quarter (month 3, 6, 9, or 12)
-    and then forward-filled so each month within that quarter carries the value.
+    Convert a quarterly PeriodIndex series to monthly.
+
+    Each of the three months within a quarter is assigned the quarter's value,
+    so the result correctly reflects when that quarterly reading applies.
+    (The previous implementation placed values only at the quarter-end month
+    and forward-filled, causing the first two months of each quarter to carry
+    the preceding quarter's value — contradicting the quarterly labeling intent.)
     """
     if q_series.empty:
         return pd.Series(dtype=float)
-    monthly_index = pd.period_range(
-        start=q_series.index[0].asfreq("M", how="E"),
-        end=q_series.index[-1].asfreq("M", how="E"),
-        freq="M",
-    )
-    monthly = pd.Series(np.nan, index=monthly_index)
+
+    records = {}
     for q_period, val in q_series.items():
-        end_month = q_period.asfreq("M", how="E")
-        if end_month in monthly.index:
-            monthly.loc[end_month] = val
-    return monthly.ffill()
+        # Assign the quarterly value to all three months within the quarter
+        for month_offset in range(3):
+            start_month = q_period.asfreq("M", how="S")
+            m = start_month + month_offset
+            records[m] = val
+
+    if not records:
+        return pd.Series(dtype=float)
+
+    monthly_index = pd.PeriodIndex(sorted(records.keys()), freq="M")
+    return pd.Series([records[m] for m in monthly_index], index=monthly_index)
 
 
 def create_forward_targets(recession_monthly: pd.Series,
@@ -320,18 +327,23 @@ def build_feature_matrix() -> dict:
 
     # Yield series (daily -> monthly mean)
     if not rba_yields.empty:
-        yc_daily = pd.Series(
-            rba_yields.get("yield_10y", np.nan).values
-            - rba_yields.get("yield_3m", rba_yields.get("yield_2y", np.nan)).values,
-            index=rba_yields.index,
-            name="yield_curve_slope",
+        has_10y = "yield_10y" in rba_yields.columns
+        short_col = "yield_3m" if "yield_3m" in rba_yields.columns else (
+            "yield_2y" if "yield_2y" in rba_yields.columns else None
         )
-        yield_curve_m = _to_monthly_period(yc_daily.dropna(), agg="mean")
+        if has_10y and short_col is not None:
+            ten = rba_yields["yield_10y"]
+            short = rba_yields[short_col]
+            yc_daily = (ten - short).rename("yield_curve_slope").dropna()
+            yield_curve_m = _to_monthly_period(yc_daily, agg="mean")
+        else:
+            logger.warning("Yield curve requires both yield_10y and a short rate — skipping yield features")
+            yield_curve_m = pd.Series(dtype=float)
         yc_10y_m = _to_monthly_period(
-            rba_yields.get("yield_10y", pd.Series(dtype=float)).dropna(), agg="mean"
+            rba_yields["yield_10y"].dropna() if has_10y else pd.Series(dtype=float), agg="mean"
         )
         yc_3m_m = _to_monthly_period(
-            rba_yields.get("yield_3m", pd.Series(dtype=float)).dropna(), agg="mean"
+            rba_yields[short_col].dropna() if short_col else pd.Series(dtype=float), agg="mean"
         )
     else:
         yield_curve_m = pd.Series(dtype=float)
