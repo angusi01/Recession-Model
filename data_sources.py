@@ -53,8 +53,11 @@ def _fetch_abs_series(series_id):
     series_data = data["data"]["dataSets"][0]["series"]
     series_key = list(series_data.keys())[0]
     observations = series_data[series_key]["observations"]
-    latest_key = max(observations.keys(), key=lambda x: int(x))
-    return float(observations[latest_key][0])
+    for key in sorted(observations.keys(), key=int, reverse=True):
+        v = observations[key][0] if observations[key] else None
+        if v is not None:
+            return float(v)
+    raise ValueError("No non-null observations found in ABS series")
 
 @st.cache_data(ttl=TTL["daily"], show_spinner=False)
 def fetch_abs_data(series_id, fallback_key):
