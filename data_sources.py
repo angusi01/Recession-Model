@@ -45,18 +45,25 @@ def _fetch_abs_series(series_id):
     This is an internal helper — use fetch_abs_data() for individual
     series with automatic fallback, or fetch_real_wage_growth() for
     derived metrics that need atomic two-series fetching.
+
+    Uses the new ABS Data API format (post-November 2024):
+    - Accept: application/json  (not vnd.sdmx.data+json)
+    - dimensionAtObservation=AllDimensions returns flat observations at dataSets[0]["observations"]
     """
-    url = f"{URLS['abs_base']}{series_id}?format=jsondata"
-    response = requests.get(url, timeout=10, headers={"Accept": "application/vnd.sdmx.data+json"})
+    url = f"{URLS['abs_base']}{series_id}?dimensionAtObservation=AllDimensions&lastNObservations=4"
+    response = requests.get(url, timeout=10, headers={"Accept": "application/json"})
     response.raise_for_status()
     data = response.json()
-    series_data = data["data"]["dataSets"][0]["series"]
-    series_key = list(series_data.keys())[0]
-    observations = series_data[series_key]["observations"]
-    for key in sorted(observations.keys(), key=int, reverse=True):
-        v = observations[key][0] if observations[key] else None
-        if v is not None:
-            return float(v)
+    dims = data["data"]["structure"]["dimensions"]["observation"]
+    time_dim = next(d for d in dims if d["id"] == "TIME_PERIOD")
+    time_pos = time_dim["keyPosition"]
+    observations = data["data"]["dataSets"][0]["observations"]
+    for key in sorted(observations.keys(),
+                      key=lambda k: int(k.split(":")[time_pos]),
+                      reverse=True):
+        v = observations[key]
+        if v and v[0] is not None:
+            return float(v[0])
     raise ValueError("No non-null observations found in ABS series")
 
 @st.cache_data(ttl=TTL["daily"], show_spinner=False)
@@ -78,8 +85,9 @@ def fetch_real_wage_growth():
     calculation falls back to FALLBACKS["real_wage_growth"].
     """
     try:
-        wpi = _fetch_abs_series("WPI/3.THRPEB.7.TOT.10.AUS.Q")
-        cpi = _fetch_abs_series("CPI/3.10001.10.50.Q")
+        wpi = _fetch_abs_series("WPI/3.1.10.Q")
+        # Intentionally headline all-groups CPI (not trimmed mean) for real wage growth.
+        cpi = _fetch_abs_series("CPI/3.10001.10.Q")
         return wpi - cpi
     except Exception as e:
         log_failure("ABS Real Wage Growth (WPI - CPI)", repr(e))
@@ -91,10 +99,18 @@ def fetch_rba_csv(url, target_col, fallback_key):
     try:
         # RBA CSVs usually have 10 rows of metadata
         df = pd.read_csv(url, skiprows=10)
-        # Find the column by exact match first, then case-insensitive partial match
+        # Find the column by exact match first, then case-insensitive partial match,
+        # then by the first word of the target (handles code-style names like PCIRON for "Iron ore")
         col = target_col if target_col in df.columns else next(
             (c for c in df.columns if target_col.lower() in c.lower()), None
         )
+        if col is None:
+            first_word = target_col.split()[0].lower()
+            col = next(
+                (c for c in df.columns
+                 if c.lower().startswith(first_word) or f"pc{first_word}" in c.lower()),
+                None,
+            )
         if col is None:
             raise KeyError(f"Column '{target_col}' not found. Available columns: {list(df.columns)}")
         # Drop rows where the target column is NaN, then get the last value
