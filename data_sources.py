@@ -24,6 +24,9 @@ FALLBACKS = {
     "cpi_headline": 4.1,
     "cpi_trimmed": 3.9,
     "cash_rate": 4.35,
+    # wpi and cpi_headline fallbacks are chosen so that wpi - cpi_headline equals
+    # the desired real_wage_growth fallback (4.2 - 4.1 = 0.1).
+    "wpi": 4.2,
     "real_wage_growth": 0.1,
     "insolvency_rate": 0.35,
     "anz_job_ads": -5.0,
@@ -219,7 +222,7 @@ def fetch_google_trends():
         return cache_data["value"], False
         
     try:
-        pytrends = TrendReq(hl='en-US', tz=360, timeout=(10,25))
+        pytrends = TrendReq(hl='en-US', tz=360, timeout=(5,10))
         kw_list = ["recession australia", "job losses australia", "mortgage stress", "fuel prices australia"]
         pytrends.build_payload(kw_list, cat=0, timeframe='today 3-m', geo='AU')
         data = pytrends.interest_over_time()
@@ -250,8 +253,8 @@ def fetch_google_trends():
 def fetch_kalshi_recession_odds():
     """Fetch US recession 2026 implied probability from Kalshi's public JSON API.
     
-    Uses the midpoint of bid/ask in dollar terms so prices are unauthenticated
-    (public endpoint). Returns a percentage 0-100.
+    Uses the midpoint of bid/ask so prices are unauthenticated (public endpoint).
+    Returns a percentage 0-100.
     """
     try:
         url = URLS["kalshi_recession"]
@@ -259,14 +262,17 @@ def fetch_kalshi_recession_odds():
         resp.raise_for_status()
         market = resp.json().get("market", {})
         
-        yes_bid = market.get("yes_bid_dollars")
-        yes_ask = market.get("yes_ask_dollars")
+        # Support both old field names (yes_bid_dollars / yes_ask_dollars, range 0-1)
+        # and new field names (yes_bid / yes_ask, range 0-99 cents).
+        if market.get("yes_bid_dollars") is not None and market.get("yes_ask_dollars") is not None:
+            midpoint = (float(market["yes_bid_dollars"]) + float(market["yes_ask_dollars"])) / 2.0
+            return round(midpoint * 100, 2)  # Convert 0-1 to percentage
         
-        if yes_bid is None or yes_ask is None:
-            raise ValueError(f"Missing price fields. Market keys: {list(market.keys())[:10]}")
+        if market.get("yes_bid") is not None and market.get("yes_ask") is not None:
+            midpoint = (float(market["yes_bid"]) + float(market["yes_ask"])) / 2.0
+            return round(midpoint, 2)  # Already in percentage (0-99)
         
-        midpoint = (float(yes_bid) + float(yes_ask)) / 2.0
-        return round(midpoint * 100, 2)  # Convert dollars (0-1) to percentage
+        raise ValueError(f"Missing price fields. Market keys: {list(market.keys())[:10]}")
     except Exception as e:
         log_failure("Kalshi US Recession Odds", repr(e))
         return FALLBACKS["kalshi_recession"]
