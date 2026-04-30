@@ -7,11 +7,17 @@ load_dotenv()
 # API Keys
 ALPHAVANTAGE_KEY = os.getenv("ALPHAVANTAGE_KEY", "demo")
 
-# Forecast target metadata
+# Forecast target metadata (legacy / informational)
 FORECAST_TARGET = "ABS March 2027 recession confirmation (Q1 + Q2 FY27)"
 FORECAST_ANNOUNCE = "March 2027"
 FORECAST_QUARTER_1 = "Sep-2026"
 FORECAST_QUARTER_2 = "Dec-2026"
+
+# ML model horizons (months)
+FORECAST_HORIZONS = [3, 6]
+
+# Walk-forward minimum training window (months)
+WF_MIN_TRAIN_MONTHS = 60
 
 # Weights for the base probability calculation (must sum to 1.0)
 WEIGHTS = {
