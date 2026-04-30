@@ -1,78 +1,322 @@
-import streamlit as st
-import plotly.graph_objects as go
-import pandas as pd
+import logging
 from datetime import datetime
-import time
 
-from config import THRESHOLDS, WEIGHTS, URLS
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
+
+from config import THRESHOLDS, URLS
+from data_builder import build_feature_matrix, get_current_feature_row
 from data_sources import (
-    fetch_abs_data, fetch_rba_csv, fetch_asic_insolvency,
-    fetch_brent_crude, fetch_westpac_sentiment, fetch_yield_curve_spread,
-    fetch_google_trends, fetch_official_keywords, fetch_kalshi_recession_odds,
-    fetch_real_wage_growth
+    fetch_abs_data, fetch_asic_insolvency, fetch_brent_crude,
+    fetch_google_trends, fetch_kalshi_recession_odds, fetch_official_keywords,
+    fetch_rba_csv, fetch_real_wage_growth, fetch_westpac_sentiment,
+    fetch_yield_curve_spread,
 )
-from model import calculate_total_probability
 from history import get_and_update_history
+from model import calculate_total_probability
+from model_ml import (
+    compute_backtest_metrics,
+    get_current_forecast,
+    train_final_models,
+    walk_forward_predict,
+)
 
-st.set_page_config(page_title="AU Recession Forecast — ABS March 2027", layout="wide")
+logging.basicConfig(level=logging.INFO)
 
-def display_gauge(probability):
-    """Render the main probability gauge."""
-    fig = go.Figure(go.Indicator(
-        mode = "gauge+number",
-        value = probability,
-        title = {'text': "Probability of ABS-Confirmed Recession — Sep-2026 + Dec-2026 | Announced March 2027"},
-        gauge = {
-            'axis': {'range': [None, 100]},
-            'bar': {'color': "darkgray"},
-            'steps': [
-                {'range': [0, 30], 'color': "green"},
-                {'range': [30, 55], 'color': "yellow"},
-                {'range': [55, 75], 'color': "orange"},
-                {'range': [75, 100], 'color': "red"}
-            ],
-            'threshold': {
-                'line': {'color': "white", 'width': 4},
-                'thickness': 0.75,
-                'value': probability
-            }
-        }
-    ))
-    fig.update_layout(height=400)
+st.set_page_config(
+    page_title="AU Recession Forecast — ML Leading Indicator Model",
+    layout="wide",
+)
+
+
+# ── Gauge helpers ─────────────────────────────────────────────────────────────
+
+def _gauge_color(prob: float) -> str:
+    if prob < 30:
+        return "green"
+    if prob < 55:
+        return "#FFC107"
+    if prob < 75:
+        return "orange"
+    return "red"
+
+
+def display_dual_gauges(p_3m: float | None, p_6m: float | None) -> None:
+    """Render two side-by-side recession probability gauges (3m and 6m)."""
+    col_a, col_b = st.columns(2)
+    for col, prob, title in [
+        (col_a, p_3m, "3-Month Recession Probability"),
+        (col_b, p_6m, "6-Month Recession Probability"),
+    ]:
+        with col:
+            val = prob if prob is not None else 0.0
+            fig = go.Figure(go.Indicator(
+                mode="gauge+number",
+                value=val,
+                number={"suffix": "%", "font": {"size": 36}},
+                title={"text": title, "font": {"size": 16}},
+                gauge={
+                    "axis": {"range": [0, 100]},
+                    "bar": {"color": "darkgray"},
+                    "steps": [
+                        {"range": [0, 30], "color": "green"},
+                        {"range": [30, 55], "color": "#FFC107"},
+                        {"range": [55, 75], "color": "orange"},
+                        {"range": [75, 100], "color": "red"},
+                    ],
+                    "threshold": {
+                        "line": {"color": "white", "width": 4},
+                        "thickness": 0.75,
+                        "value": val,
+                    },
+                },
+            ))
+            fig.update_layout(height=320, margin=dict(t=40, b=0, l=20, r=20))
+            st.plotly_chart(fig, use_container_width=True)
+            if prob is None:
+                st.caption("⚠️ Model not yet available — insufficient historical data.")
+
+
+# ── Historical probability chart ──────────────────────────────────────────────
+
+def display_probability_trend(wf_df: pd.DataFrame, recession_series: pd.Series) -> None:
+    """Plot the walk-forward OOS probability trend with recession shading."""
+    if wf_df.empty:
+        st.info("Walk-forward backtest data not yet available.")
+        return
+
+    # Convert PeriodIndex to timestamp for Plotly
+    def _to_ts(idx):
+        if hasattr(idx, "to_timestamp"):
+            return idx.to_timestamp()
+        return pd.to_datetime(idx.astype(str))
+
+    dates = _to_ts(wf_df.index)
+    fig = go.Figure()
+
+    # Recession shading
+    if not recession_series.empty:
+        rec = recession_series.reindex(wf_df.index).fillna(0)
+        in_rec = False
+        rec_start = None
+        rec_dates = _to_ts(rec.index)
+        for i, (d, v) in enumerate(zip(rec_dates, rec.values)):
+            if v == 1 and not in_rec:
+                rec_start = d
+                in_rec = True
+            elif v == 0 and in_rec:
+                fig.add_vrect(
+                    x0=rec_start, x1=d,
+                    fillcolor="rgba(220,50,50,0.15)",
+                    line_width=0,
+                    annotation_text="Recession",
+                    annotation_position="top left",
+                )
+                in_rec = False
+        if in_rec and rec_start is not None:
+            fig.add_vrect(x0=rec_start, x1=dates.iloc[-1], fillcolor="rgba(220,50,50,0.15)", line_width=0)
+
+    # 50% threshold line
+    fig.add_hline(y=50, line_dash="dash", line_color="orange",
+                  annotation_text="50% threshold", annotation_position="bottom right")
+
+    if "p_ens_3m" in wf_df.columns:
+        fig.add_trace(go.Scatter(
+            x=dates, y=(wf_df["p_ens_3m"] * 100).round(1),
+            mode="lines", name="3m Forecast", line=dict(color="#1f77b4", width=2),
+        ))
+    if "p_ens_6m" in wf_df.columns:
+        fig.add_trace(go.Scatter(
+            x=dates, y=(wf_df["p_ens_6m"] * 100).round(1),
+            mode="lines", name="6m Forecast", line=dict(color="#ff7f0e", width=2, dash="dot"),
+        ))
+
+    fig.update_layout(
+        title="Historical Walk-Forward Recession Probability (Out-of-Sample)",
+        xaxis_title="Date",
+        yaxis_title="Probability (%)",
+        yaxis=dict(range=[0, 100]),
+        height=380,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
     st.plotly_chart(fig, use_container_width=True)
-    return fig
 
-def generate_dynamic_advice(probability, raw_data):
-    """Generate insight text based on current readings."""
-    advice = "### Market Insight\n"
-    if probability < 30:
-        advice += "The economy is running reliably clear of recessionary thresholds. No immediate action triggers noted."
-    elif 30 <= probability < 60:
-        advice += "Elevated risks present. Close monitoring of employment and leading indicator trends is advised."
-    else:
-        advice += "🔴 **High Recession Risk.** To exit the danger zone:\n"
-        # Check which metrics are nearest danger
-        if raw_data["gdp_qq"] <= THRESHOLDS["gdp_qq"]["safe"]:
-            advice += f"- GDP must print at least {THRESHOLDS['gdp_qq']['safe']}% q/q.\n"
-        if raw_data["unemployment"] >= THRESHOLDS["unemployment"]["danger"] - 0.5:
-            advice += f"- Unemployment needs to fall back below {THRESHOLDS['unemployment']['safe']}%. \n"
-        if raw_data["yield_curve"] <= THRESHOLDS["yield_curve"]["danger"] + 0.1:
-            advice += f"- Yield curve needs to steepen back above {THRESHOLDS['yield_curve']['safe']}%.\n"
-    
-    return advice
+
+# ── Feature importance chart ──────────────────────────────────────────────────
+
+def display_feature_importance(importance: dict) -> None:
+    """Display LR coefficient bar chart (positive = increases recession risk)."""
+    if not importance:
+        st.info("Feature importance not available.")
+        return
+
+    sorted_items = sorted(importance.items(), key=lambda x: abs(x[1]), reverse=True)[:12]
+    names = [k.replace("_", " ").title() for k, _ in sorted_items]
+    values = [v for _, v in sorted_items]
+    colors = ["#d62728" if v > 0 else "#2ca02c" for v in values]
+
+    fig = go.Figure(go.Bar(
+        x=values,
+        y=names,
+        orientation="h",
+        marker_color=colors,
+    ))
+    fig.update_layout(
+        title="Model Drivers — LR Coefficients (3m, red = increases risk)",
+        xaxis_title="Coefficient",
+        height=380,
+        margin=dict(l=160),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
+# ── Backtest metrics display ──────────────────────────────────────────────────
+
+def display_backtest_metrics(metrics: dict) -> None:
+    """Show ROC-AUC, Brier score and early-detection lead time."""
+    m = st.columns(5)
+
+    def _fmt(val, decimals=3, suffix=""):
+        return f"{val:.{decimals}f}{suffix}" if val is not None else "N/A"
+
+    m[0].metric("ROC-AUC (3m)", _fmt(metrics.get("roc_auc_3m"), 3))
+    m[1].metric("Brier Score (3m)", _fmt(metrics.get("brier_3m"), 4))
+    m[2].metric("ROC-AUC (6m)", _fmt(metrics.get("roc_auc_6m"), 3))
+    m[3].metric("Brier Score (6m)", _fmt(metrics.get("brier_6m"), 4))
+    avg_early = metrics.get("avg_months_early")
+    m[4].metric(
+        "Avg Early Detection",
+        f"{avg_early:.1f} mo" if avg_early is not None else "N/A",
+        help="Average months before recession onset that the 3m probability exceeded 50%",
+    )
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    st.title("AU Recession Forecast — ABS March 2027 📉")
-    st.write("Probability of an ABS-confirmed recession (Sep-2026 + Dec-2026 quarters), announced March 2027.")
-    
-    with st.spinner("Fetching live economic data..."):
-        # Fetching all required data
-        trends_val, trends_err = fetch_google_trends()
+    st.title("🇦🇺 AU Recession Forecast — ML Leading Indicator Model")
+    st.markdown(
+        "**True walk-forward model** — all features lag-adjusted for real-time availability. "
+        "No lookahead bias. Targets: *recession probability over next 3 months* and *6 months*."
+    )
 
-        # Yield curve: 10-year CGS minus 2-year CGS (RBA F2 table)
+    # ── Sidebar ───────────────────────────────────────────────────────────────
+    st.sidebar.header("ℹ️ Model Info")
+    st.sidebar.markdown(
+        "**Architecture**: Logistic Regression + Gradient Boosting ensemble, "
+        "calibrated via isotonic regression on walk-forward out-of-sample predictions.\n\n"
+        "**Recession definition**: 2 consecutive quarters of negative GDP growth (ABS).\n\n"
+        "**Targets**: y_3m = recession in next 3 months; y_6m = in next 6 months.\n\n"
+        "**Data freshness** is shown at the bottom of the page."
+    )
+
+    # ── Step 1: Build historical feature matrix (cached 24 h) ────────────────
+    with st.spinner("📡 Fetching historical data and building feature matrix…"):
+        try:
+            matrix = build_feature_matrix()
+            features_df = matrix["features"]
+            y_3m = matrix["y_3m"]
+            y_6m = matrix["y_6m"]
+            recession_series = matrix["recession"]
+            matrix_ok = not features_df.empty
+        except Exception as e:
+            st.error(f"Failed to build feature matrix: {e}")
+            matrix_ok = False
+            features_df = pd.DataFrame()
+            y_3m = y_6m = recession_series = pd.Series(dtype=int)
+
+    # ── Step 2: Walk-forward backtest (cached 24 h) ───────────────────────────
+    with st.spinner("🔄 Running walk-forward validation…"):
+        if matrix_ok:
+            try:
+                wf_df = walk_forward_predict(features_df, y_3m, y_6m)
+            except Exception as e:
+                st.warning(f"Walk-forward failed: {e}")
+                wf_df = pd.DataFrame()
+        else:
+            wf_df = pd.DataFrame()
+
+    # ── Step 3: Train final models + calibrate (cached 24 h) ─────────────────
+    with st.spinner("🤖 Training final models…"):
+        if matrix_ok:
+            try:
+                models = train_final_models(features_df, y_3m, y_6m, wf_df)
+            except Exception as e:
+                st.warning(f"Model training failed: {e}")
+                models = {}
+        else:
+            models = {}
+
+    # ── Step 4: Current forecast ──────────────────────────────────────────────
+    current_row = get_current_feature_row(features_df) if matrix_ok else None
+    if current_row is not None and models:
+        forecast = get_current_forecast(current_row, models)
+    else:
+        forecast = {"p_3m": None, "p_6m": None, "feature_importance": {}}
+
+    # ── Section 1: Dual gauges ────────────────────────────────────────────────
+    st.subheader("📊 Current Recession Probability Forecast")
+    display_dual_gauges(forecast.get("p_3m"), forecast.get("p_6m"))
+
+    # Probability interpretation text
+    if forecast.get("p_3m") is not None:
+        p3 = forecast["p_3m"]
+        p6 = forecast["p_6m"]
+        if p3 >= 60:
+            st.error(f"🔴 **High recession risk** — 3m: {p3:.1f}% | 6m: {p6:.1f}%")
+        elif p3 >= 35:
+            st.warning(f"🟠 **Elevated recession risk** — 3m: {p3:.1f}% | 6m: {p6:.1f}%")
+        else:
+            st.success(f"🟢 **Low recession risk** — 3m: {p3:.1f}% | 6m: {p6:.1f}%")
+
+    # Show individual model outputs
+    with st.expander("🔍 Model component outputs"):
+        comp_cols = st.columns(4)
+        for i, (label, key) in enumerate([
+            ("LR 3m", "p_lr_3m"), ("GB 3m", "p_gb_3m"),
+            ("LR 6m", "p_lr_6m"), ("GB 6m", "p_gb_6m"),
+        ]):
+            val = forecast.get(key)
+            comp_cols[i].metric(label, f"{val:.1f}%" if val is not None else "N/A")
+
+    st.divider()
+
+    # ── Section 2: Historical probability trend ───────────────────────────────
+    st.subheader("📈 Historical Walk-Forward Probability (Backtest)")
+    display_probability_trend(wf_df, recession_series)
+
+    st.divider()
+
+    # ── Section 3: Backtest metrics ───────────────────────────────────────────
+    st.subheader("📐 Backtest Metrics (Out-of-Sample)")
+    if not wf_df.empty:
+        metrics = compute_backtest_metrics(wf_df)
+        display_backtest_metrics(metrics)
+        st.caption(
+            "ROC-AUC > 0.7 = useful. Brier score < 0.1 = well-calibrated. "
+            "'Avg Early Detection' = months before recession onset where 3m P > 50%."
+        )
+    else:
+        st.info("Backtest metrics require walk-forward data (loading…).")
+
+    st.divider()
+
+    # ── Section 4: Feature importance ────────────────────────────────────────
+    st.subheader("🔑 Top Model Drivers (LR Coefficients — 3m Horizon)")
+    display_feature_importance(forecast.get("feature_importance", {}))
+
+    st.divider()
+
+    # ── Section 5: Live data indicators (kept from original system) ───────────
+    st.subheader("📡 Live Indicator Readings")
+
+    with st.spinner("Fetching live economic data…"):
+        trends_val, trends_err = fetch_google_trends()
         yield_curve_val = fetch_yield_curve_spread(URLS["rba_yield_curve"])
 
-        raw_data = {
+        live_data = {
             "yield_curve": yield_curve_val,
             "iron_ore": fetch_rba_csv(URLS["rba_commodity_prices"], "Iron ore", "iron_ore"),
             "gdp_qq": fetch_abs_data("NA/1.1.1.20.Q", "gdp_qq"),
@@ -80,228 +324,122 @@ def main():
             "cpi_trimmed": fetch_abs_data("CPI/1.10002.10.20.Q", "cpi_trimmed"),
             "real_wage_growth": fetch_real_wage_growth(),
             "insolvency_rate": fetch_asic_insolvency(),
-            "anz_job_ads": -5.0,  # TODO: replace with live ANZ Job Ads m/m % change when feed is available
             "brent_crude": fetch_brent_crude(),
             "westpac_sentiment": fetch_westpac_sentiment(),
             "google_trends": trends_val,
             "keyword_hits": fetch_official_keywords(),
             "kalshi_recession": fetch_kalshi_recession_odds(),
+            "anz_job_ads": -5.0,
         }
 
     if trends_err:
-        st.warning("⚠️ **Google Trends Alert:** API rate limit reached. Using last known cached value for consumer sentiment overlay.")
+        st.warning("⚠️ Google Trends: API rate limit. Using cached value.")
 
-    # Model Calculation (Base Case)
-    results_base = calculate_total_probability(raw_data)
-    
-    # Save/load history diff
-    merged_contribs = {**results_base["contributions"], **results_base["overlays"]}
-    diff_data = get_and_update_history(results_base["total_probability"], merged_contribs)
-    
-    # Scenario Selection
-    st.sidebar.header("Scenario Analysis")
-    scenario = st.sidebar.select_slider(
-        "Market Assumption", 
-        options=["Soft Landing", "Base Case", "Hard Landing"], 
-        value="Base Case"
-    )
-    
-    adjusted_data = raw_data.copy()
-    if scenario == "Soft Landing":
-        adjusted_data["gdp_qq"] = max(adjusted_data["gdp_qq"] + 0.3, 0.4)
-        adjusted_data["unemployment"] = max(adjusted_data["unemployment"] - 0.3, 3.8)
-        adjusted_data["cpi_trimmed"] = max(adjusted_data["cpi_trimmed"] - 0.5, 2.5)
-        adjusted_data["yield_curve"] = adjusted_data["yield_curve"] + 0.3
-        adjusted_data["iron_ore"] = adjusted_data["iron_ore"] + 10.0
-        adjusted_data["anz_job_ads"] = adjusted_data["anz_job_ads"] + 5.0
-    elif scenario == "Hard Landing":
-        adjusted_data["gdp_qq"] -= 0.6
-        adjusted_data["unemployment"] += 1.0
-        adjusted_data["cpi_trimmed"] += 1.0
-        adjusted_data["yield_curve"] = adjusted_data["yield_curve"] - 0.4
-        adjusted_data["iron_ore"] = adjusted_data["iron_ore"] - 15.0
-        adjusted_data["anz_job_ads"] = adjusted_data["anz_job_ads"] - 8.0
-        adjusted_data["brent_crude"] += 20
-        
-    results = calculate_total_probability(adjusted_data)
-    
-    # Export Options in Sidebar
-    st.sidebar.divider()
-    st.sidebar.subheader("Export Data")
-    
-    # 1. Gauge section
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        fig_gauge = display_gauge(results["total_probability"])
-        
-        try:
-            img_bytes = fig_gauge.to_image(format="png", engine="kaleido")
-            st.sidebar.download_button("📸 Download Gauge (PNG)", data=img_bytes, file_name=f"recession_gauge_{datetime.now().strftime('%Y%m%d')}.png", mime="image/png")
-        except (ImportError, ValueError):
-            st.sidebar.caption("📸 PNG export unavailable — install `kaleido` to enable.")
-        except Exception:
-            pass # export failed for another transient reason
-            
-        csv_bytes = pd.DataFrame([adjusted_data]).to_csv(index=False).encode('utf-8')
-        st.sidebar.download_button("📊 Download Raw Data (CSV)", data=csv_bytes, file_name=f"recession_data_{datetime.now().strftime('%Y%m%d')}.csv", mime="text/csv")
-        
-        # Historical Diff Explainer
-        if diff_data and scenario == "Base Case":
-            diff_abs = diff_data["diff_total"]
-            sign = "+" if diff_abs > 0 else ""
-            if abs(diff_abs) >= 0.1:
-                explainer = f"🧐 **What just moved it?** Recession probability {sign}{diff_abs:.1f} pts vs anchor, mainly due to: "
-                reasons = []
-                for k, v in diff_data["top_movers"]:
-                    rsign = "+" if v > 0 else ""
-                    reasons.append(f"**{k}** ({rsign}{v:.1f})")
-                explainer += ", ".join(reasons) + "."
-                st.info(explainer)
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    m1.metric("Yield Curve (10y-2y)", f"{live_data['yield_curve']:.2f}%")
+    m2.metric("Iron Ore (USD)", f"${live_data['iron_ore']:.0f}")
+    m3.metric("GDP q/q", f"{live_data['gdp_qq']:.2f}%")
+    m4.metric("Unemployment", f"{live_data['unemployment']:.1f}%")
+    m5.metric("Trimmed CPI", f"{live_data['cpi_trimmed']:.1f}%")
+    m6.metric("Real Wage Growth", f"{live_data['real_wage_growth']:.2f}%")
 
-    with col2:
-        st.markdown(f"### Latest Run")
-        st.write(f"Updated: **{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}**")
-        st.write(f"Base Probability: **{results['base_probability']:.1f}%**")
-        st.write(f"Total Overlays: **{sum(results['overlays'].values()):.1f}%**")
-        
-        st.caption(generate_dynamic_advice(results["total_probability"], adjusted_data))
-        
-        # Tripwire Checklist
-        st.markdown("### 🚨 Tripwires")
-        gdp_val = adjusted_data["gdp_qq"]
-        unemp_val = adjusted_data["unemployment"]
-        yc_val = adjusted_data["yield_curve"]
-        io_val = adjusted_data["iron_ore"]
-        anz_val = adjusted_data["anz_job_ads"]
-        
-        def trip_status(val, danger, safe, inverted=False):
-            if inverted:
-                if val <= danger: return "🔴"
-                if val <= safe: return "🟠"
-            else:
-                if val >= danger: return "🔴"
-                if val >= safe: return "🟠"
-            return "🟢"
-            
-        st.markdown(f"{trip_status(yc_val, THRESHOLDS['yield_curve']['danger'], THRESHOLDS['yield_curve']['safe'], THRESHOLDS['yield_curve']['lower_is_worse'])} **Yield Curve** ({yc_val:.2f}%)")
-        st.markdown(f"{trip_status(io_val, THRESHOLDS['iron_ore']['danger'], THRESHOLDS['iron_ore']['safe'], THRESHOLDS['iron_ore']['lower_is_worse'])} **Iron Ore** (${io_val:.0f})")
-        st.markdown(f"{trip_status(gdp_val, THRESHOLDS['gdp_qq']['danger'], THRESHOLDS['gdp_qq']['safe'], THRESHOLDS['gdp_qq']['lower_is_worse'])} **GDP q/q** ({gdp_val:.1f}%)")
-        st.markdown(f"{trip_status(unemp_val, THRESHOLDS['unemployment']['danger'], THRESHOLDS['unemployment']['safe'], THRESHOLDS['unemployment']['lower_is_worse'])} **Unemployment** ({unemp_val:.1f}%)")
-        st.markdown(f"{trip_status(anz_val, THRESHOLDS['anz_job_ads']['danger'], THRESHOLDS['anz_job_ads']['safe'], THRESHOLDS['anz_job_ads']['lower_is_worse'])} **ANZ Job Ads** ({anz_val:+.1f}%)")
-        
+    m7, m8, m9, m10 = st.columns(4)
+    m7.metric("Insolvency Rate", f"{live_data['insolvency_rate']:.2f}%")
+    m8.metric("Brent Crude", f"${live_data['brent_crude']:.0f}")
+    m9.metric("Westpac Sentiment", f"{live_data['westpac_sentiment']:.1f}")
+    m10.metric("Kalshi US Recession", f"{live_data['kalshi_recession']:.1f}%")
+
     st.divider()
 
-    # 2. Metric Cards
-    st.subheader("Current Core Indicators (Live Fetch)")
-    m1, m2, m3, m4, m5, m6, m7, m8 = st.columns(8)
-    m1.metric("Yield Curve", f"{adjusted_data['yield_curve']:.2f}%", f"{adjusted_data['yield_curve'] - raw_data['yield_curve']:.2f}%" if scenario != "Base Case" else None)
-    m2.metric("Iron Ore", f"${adjusted_data['iron_ore']:.0f}", f"{adjusted_data['iron_ore'] - raw_data['iron_ore']:.0f}" if scenario != "Base Case" else None)
-    m3.metric("GDP (q/q)", f"{adjusted_data['gdp_qq']:.2f}%", f"{adjusted_data['gdp_qq'] - raw_data['gdp_qq']:.2f}%" if scenario != "Base Case" else None)
-    m4.metric("Unemployment", f"{adjusted_data['unemployment']:.1f}%", f"{adjusted_data['unemployment'] - raw_data['unemployment']:.1f}%" if scenario != "Base Case" else None)
-    m5.metric("ANZ Job Ads", f"{adjusted_data['anz_job_ads']:+.1f}%", f"{adjusted_data['anz_job_ads'] - raw_data['anz_job_ads']:.1f}%" if scenario != "Base Case" else None)
-    m6.metric("Real Wage Growth", f"{adjusted_data['real_wage_growth']:.2f}%", f"{adjusted_data['real_wage_growth'] - raw_data['real_wage_growth']:.2f}%" if scenario != "Base Case" else None)
-    m7.metric("Trimmed CPI", f"{adjusted_data['cpi_trimmed']:.1f}%", f"{adjusted_data['cpi_trimmed'] - raw_data['cpi_trimmed']:.1f}%" if scenario != "Base Case" else None)
-    m8.metric("Insolvencies", f"{adjusted_data['insolvency_rate']:.2f}%", f"{adjusted_data['insolvency_rate'] - raw_data['insolvency_rate']:.2f}%" if scenario != "Base Case" else None)
-    
-    st.divider()
-
-    # 3. Bar Chart for Contributions
-    col_chart, col_sources = st.columns([1, 1])
-    
-    with col_chart:
-        st.subheader("Score Breakdown")
-        breakdown = {**results["contributions"], **results["overlays"]}
-        df_breakdown = pd.DataFrame(list(breakdown.items()), columns=["Factor", "Contribution (%)"])
+    # ── Section 6: Legacy scoring model (reference) ───────────────────────────
+    with st.expander("📋 Legacy Rule-Based Score (Reference Only)"):
+        st.markdown(
+            "_The original weighted scoring model is shown here as a reference. "
+            "The ML model above is the primary forecast._"
+        )
+        results_legacy = calculate_total_probability(live_data)
+        st.metric(
+            "Legacy Score",
+            f"{results_legacy['total_probability']:.1f}%",
+            help="Weighted indicator scoring model (not ML-based).",
+        )
+        breakdown = {**results_legacy["contributions"], **results_legacy["overlays"]}
+        df_breakdown = pd.DataFrame(
+            list(breakdown.items()), columns=["Factor", "Contribution (%)"]
+        )
         fig_bar = go.Figure(go.Bar(
             x=df_breakdown["Contribution (%)"],
             y=df_breakdown["Factor"],
-            orientation='h'
+            orientation="h",
         ))
-        fig_bar.update_layout(yaxis={'categoryorder':'total ascending'})
+        fig_bar.update_layout(
+            yaxis={"categoryorder": "total ascending"},
+            height=350,
+            title="Legacy Score Breakdown",
+        )
         st.plotly_chart(fig_bar, use_container_width=True)
 
-    with col_sources:
-        st.subheader("Data Sources")
-        source_df = pd.DataFrame({
-            "Source": ["ABS", "RBA", "ASIC", "Alpha Vantage", "Westpac", "Google Trends", "Gov Media", "Kalshi"],
-            "Description": ["Economic Data", "Yield Curve & Commodities", "Insolvencies", "Brent Crude", "Sentiment", "Keyword Volume", "Signals", "US Recession Market"],
-            "Status": ["Active"] * 8
-        })
-        st.dataframe(source_df, hide_index=True, use_container_width=True)
-
     st.divider()
 
-    # 4. Prediction Market: Market vs Model
-    st.subheader("🎯 Prediction Markets: Market vs Model")
-    kalshi_odds = raw_data["kalshi_recession"]
-    model_prob = results["total_probability"]
-    kalshi_overlay_val = results["overlays"].get("US Prediction Market (Kalshi)", 0.0)
-    
-    pm_col1, pm_col2, pm_col3 = st.columns(3)
-    
-    with pm_col1:
-        st.metric(
-            label="🇺🇸 Kalshi: US Recession 2026",
-            value=f"{kalshi_odds:.1f}%",
-            help="Implied probability from the YES/NO prediction market on Kalshi. "
-                 "Midpoint of bid/ask on KXRECSSNBER-26 contract."
-        )
-        us_signal = "🔴 High" if kalshi_odds >= 50 else ("🟠 Elevated" if kalshi_odds >= 25 else "🟢 Normal")
-        st.caption(f"US recession signal: **{us_signal}**")
-        st.caption("[View on Kalshi ↗](https://kalshi.com/markets/kxrecssnber-26)")
-
-    with pm_col2:
-        st.metric(
-            label="🇦🇺 Model: AU Recession Probability",
-            value=f"{model_prob:.1f}%",
-            help="This model's current output — weighted indicators plus all overlays."
-        )
-        spread = model_prob - kalshi_odds
-        spread_text = f"+{spread:.1f} pts above Kalshi" if spread >= 0 else f"{spread:.1f} pts below Kalshi"
-        st.caption(f"Spread vs market: **{spread_text}**")
-
-    with pm_col3:
-        st.metric(
-            label="📊 Kalshi → AU Overlay Applied",
-            value=f"+{kalshi_overlay_val:.1f} pts",
-            help="The portion of AU probability added by the Kalshi signal. "
-                 "Only activates above 25% threshold. Capped at +12 pts."
-        )
-        if kalshi_odds < 25:
-            st.caption("Below 25% threshold — no overlay currently active.")
-        else:
-            effective_pct = min(100, (kalshi_overlay_val / 12.0) * 100)
-            st.caption(f"Cap utilisation: **{effective_pct:.0f}% of +12 pt max**")
-
-    st.divider()
-    with st.expander("📖 Methodology & Data Sources"):
+    # ── Section 7: Methodology ────────────────────────────────────────────────
+    with st.expander("📖 Methodology & Anti-Lookahead Design"):
         st.markdown("""
-        **AU Recession Forecast — ABS March 2027 Methodology**
-        
-        This model targets an ABS-confirmed recession across **Sep-2026 (Q1 FY27)** and **Dec-2026 (Q2 FY27)**, 
-        with the official ABS announcement expected in **March 2027**.
-        
-        Each core indicator is scored linearly from 0 (safe) to 1 (danger) using calibrated thresholds, 
-        then multiplied by its weight to produce a base probability.
-        
-        **Leading Indicators (base weights)**
-        - **Yield Curve (20%)**: 10Y − 2Y CGS spread from RBA F2. Inversion (negative) is a leading recession signal.
-        - **Iron Ore (15%)**: USD spot price. Sustained weakness below $85 signals Chinese demand slowdown and commodity income shock.
-        - **Unemployment (15%)**: ABS Labour Force. Rising unemployment feeds directly into demand contraction.
-        - **Real Wage Growth (12%)**: WPI minus headline CPI. Persistent negative real wages erode household consumption.
-        - **GDP q/q (12%)**: ABS National Accounts. Technical recession requires two consecutive negative quarters.
-        - **Insolvency Rate (10%)**: ASIC corporate insolvencies as a share of registered companies.
-        - **ANZ Job Ads (8%)**: Month-on-month % change in job advertisements. Leading indicator for future employment.
-        - **Trimmed CPI (8%)**: RBA's preferred underlying inflation measure. Persistently high inflation forces rate holds that restrain growth.
-        
-        **Note on Trimmed CPI**: Oil price movements are captured solely via the **Geopolitical (Brent Crude)** overlay. 
-        Trimmed CPI does not receive an oil passthrough adjustment — the trimmed mean explicitly excludes extreme price 
-        movements and is not mechanically linked to energy shocks in the same way as headline CPI.
-        
-        *Overlays*: Brent Crude shocks, Consumer Sentiment crashes, Media Panic signals, and US Prediction Market odds add discrete penalty multipliers to the base score.
-        The **Kalshi overlay** is applied only when US recession odds exceed 25% (above normal expansion baseline), scaling at +0.5 AU pts per 1 US pt, capped at +12 pts.
-        All signals are derived direct from official endpoints (ABS, RBA, ASIC) and updated daily.
+        ## True Leading Recession Prediction System
+
+        ### No-Lookahead Principle
+        At any time **T**, the model uses only data available at T:
+        - **GDP** (quarterly) → lagged 1 quarter (ABS releases ~90 days after quarter end)
+        - **CPI trimmed** (quarterly) → lagged 1 quarter
+        - **Unemployment** (monthly) → lagged 1 month (~6-week release lag)
+        - **Market data** (yield curve, iron ore, ASX200) → no lag required
+
+        ### Recession Definition
+        Two consecutive quarters of negative GDP growth (q/q %, ABS National Accounts).
+
+        ### Forward Targets
+        - **y_3m**: recession occurs in any of the next 3 months
+        - **y_6m**: recession occurs in any of the next 6 months
+
+        ### Features
+        | Feature | Description |
+        |---------|-------------|
+        | yield_curve_slope | 10Y CGS − 90-day bank bill rate (inversion = leading signal) |
+        | yield_curve_3m_delta | 3-month change in slope |
+        | yield_curve_zscore | 5-year rolling z-score |
+        | unemployment | ABS unemployment rate (lagged 1 month) |
+        | unemployment_3m_change | 3-month change in unemployment (lagged) |
+        | unemployment_change_zscore | 5-year rolling z-score of 3m change |
+        | gdp_qq | ABS GDP q/q % change (lagged 1 quarter) |
+        | gdp_4q_sum | Rolling 4-quarter GDP sum (annualised momentum) |
+        | cpi_trimmed | ABS trimmed mean CPI (lagged 1 quarter) |
+        | iron_ore | RBA iron ore USD spot price |
+        | iron_ore_3m_pct | 3-month % change in iron ore |
+        | iron_ore_zscore | 5-year rolling z-score |
+        | asx200_drawdown | Rolling 12-month drawdown from peak |
+        | asx200_3m_return | 3-month equity market return |
+
+        ### Walk-Forward Validation
+        Expanding window: train on [start → t], predict at t+1.
+        Minimum 5 years of training data required. Re-trains every 6 months.
+
+        ### Models
+        - **Logistic Regression** (L2, class_weight='balanced') — interpretable baseline
+        - **Gradient Boosting** (shallow trees, 60 estimators) — nonlinear signals
+        - **Ensemble**: simple average of both, then isotonic calibration
+
+        ### Calibration
+        Isotonic regression fitted on walk-forward OOS predictions ensures
+        probabilities are well-calibrated (meaningful as true probabilities).
         """)
+
+    # ── Data freshness ────────────────────────────────────────────────────────
+    st.caption(
+        f"🕒 Data fetched: **{datetime.now().strftime('%Y-%m-%d %H:%M UTC')}** | "
+        f"Feature matrix as of: **{str(features_df.index[-1]) if not features_df.empty else 'N/A'}** | "
+        f"Historical data source: ABS, RBA, yfinance (ASX200)"
+    )
+
 
 if __name__ == "__main__":
     main()
+
